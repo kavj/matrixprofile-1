@@ -6,6 +6,15 @@ from cython.view cimport array
 # operations that are used for aggregated buffer management. 
 #
 
+
+cdef windowed_mean(double [::1] ts, double[::1] mu)
+cdef windowed_cent_norm(double[::1] ts, double[::1] mu, double[::1] sig)
+cdef normalize_one(double[::1] out, double[::1] ts, double mu, double sig)
+cdef normalize_one(double[::1] out, double[::1] ts, double mu, double sig)
+cdef crosscov(double[::1] out, double[::1] ts, double[::1] mu, double[::1] sig, double[::1] cmpseq)
+cdef mpx_step_eqns(double[::1] ts, double[::1] mu, double[::1] mu_s, double[::1] rbwd, double[::1] cbwd, double[::1] rfwd, double[::1] cfwd)
+
+
 cdef class auto_params:
     cdef:
         array ts

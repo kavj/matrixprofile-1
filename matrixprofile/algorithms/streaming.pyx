@@ -34,7 +34,7 @@ cdef windowed_mean(double [::1] ts, double[::1] mu):
     return mu
 
 
-cdef windowed_cent_norm(double [::1] ts, double[::1] mu, double[::1] sig):
+cdef windowed_cent_norm(double[::1] ts, double[::1] mu, double[::1] sig):
     cdef Py_ssize_t tslen = ts.shape[0]
     cdef Py_ssize_t windowcount = mu.shape[0]
     if windowcount < 1 or windowcount > tslen: 
@@ -54,30 +54,30 @@ cdef windowed_cent_norm(double [::1] ts, double[::1] mu, double[::1] sig):
     return sig
 
 
-# Todo: refactor all mpx logic and moment calculations to a sharable C interface that does not use numpy's namespace
-
-cdef normalize(double [:, ::1] ss, double[::1] ts, double[::1] mu, double[::1] sig, Py_ssize_t start):
-    cdef Py_ssize_t windowcount = ss.shape[0]
-    cdef Py_ssize_t windowlen = ss.shape[1]
-    windowcount = mu.shape[0]
-    windowlen = ts.shape[0] - mu.shape[0] + 1
-    # ts, mu, and sig must represent the same number of available subsequences
-    # start dictates the starting index within these, as this avoids redundant slicing of multiple components
-    # ss.shape[0] exposes the number of subsequences that should be normalized
-    # 
-
+cdef normalize_one(double[::1] out, double[::1] ts, double mu, double sig):
     cdef Py_ssize_t i,j
-    cdef double m_, s_
-    for i in range(windowcount):
+    for i in range(out.shape[0]):
+        out[i] = (ts[i] - mu) / sig
+
+
+cdef crosscov(double[::1] out, double[::1] ts, double[::1] mu, double[::1] sig, double[::1] cmpseq):
+    cdef Py_ssize_t sseqct = out.shape[0]
+    cdef double accum, m_
+    if sseqct != mu.shape[0] or sseqct != sig.shape[0]:
+        raise ValueError
+    elif cmpseq.shape[0] != ts.shape[0] - sseqct + 1:
+        raise ValueError
+    cdef Py_ssize_t i, j
+    for i in range(sseqct):
         accum = 0.0
         m_ = mu[i]
-        s_ = sig[i]
-        for j in range(windowlen):
-            ss[i, j] = (ts[i + j] - m_) / s_
+        for j in range(cmpseq.shape[0]):
+            accum += (ts[i + j] - m_) * cmpseq[j]
+        out[i] = accum
 
 
 # factored out from mpx method, should probably go somewhere else
-cdef mpx_step_eqns(double [::1] ts, double [::1] mu, double[::1] mu_s, double[::1] rbwd, double[::1] cbwd, double[::1] rfwd, double[::1] cfwd):    
+cdef mpx_step_eqns(double[::1] ts, double[::1] mu, double[::1] mu_s, double[::1] rbwd, double[::1] cbwd, double[::1] rfwd, double[::1] cfwd):    
     cdef Py_ssize_t sseqct = mu.shape[0]
     cdef Py_ssize_t sseqlen = ts.shape[0] - mu.shape[0] + 1
     cdef Py_ssize_t i
