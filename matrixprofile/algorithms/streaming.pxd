@@ -31,16 +31,16 @@ cdef class auto_params:
 
 cdef class mpstream:
     cdef:
-        auto_params ts
+        auto_params tssect
         array _mp
         array _mpi
-        append(self, auto_params sect)
+        append(self, double[::1] ts)
 
     cdef readonly:
         Py_ssize_t bufferlen
         Py_ssize_t profilelen
         Py_ssize_t sseqlen
-        Py_ssize_t minlag
-        Py_ssize_t maxlag
+        Py_ssize_t minsep
+        Py_ssize_t maxsep
    
      

@@ -91,7 +91,7 @@ cdef mpx_step_eqns(double [::1] ts, double [::1] mu, double[::1] mu_s, double[::
 
 cdef class auto_params:
 
-    def __cinit__(self, double[::1] ts, Py_ssize_t sseqlen):
+    def __cinit__(self, double[::1] ts, Py_ssize_t sseqlen, Py_ssize_t offset=0):
         cdef init_buffer_len = 4096 if ts.shape[0] <= 4096 else ts.shape[0]
         self._ts = array(shape=(init_buffer_len,), itemsize=sizeof(double), format='d')
         self._mu = array(shape=(init_buffer_len,), itemsize=sizeof(double), format='d')
@@ -101,7 +101,9 @@ cdef class auto_params:
         self._r_fwd = array(shape=(init_buffer_len-1,), itemsize=sizeof(double), format='d')
         self._c_fwd = array(shape=(init_buffer_len-1,), itemsize=sizeof(double), format='d')
         self.rlen = ts.shape[0]
+        self.minidx = offset
  
+
     cdef row_diffs(self, Py_ssize_t begin=-1):
         if begin == -1:
             return self._r_bwd.get_memview(), self._r_fwd.get_memview()
@@ -111,6 +113,7 @@ cdef class auto_params:
             raise ValueError('index too high')
         cdef Py_ssize_t beginpos = begin - self.minidx
         return self._r_bwd[beginpos:self.rlen-1], self._r_fwd[beginpos:self.rlen-1]
+
     
     cdef col_diffs(self, Py_ssize_t begin=-1):
         if begin == -1:  
@@ -122,8 +125,10 @@ cdef class auto_params:
         cdef Py_ssize_t beginpos = begin - self.minidx
         return self._c_bwd[beginpos:self.rlen-1], self._c_fwd[beginpos:self.rlen-1]
 
+
     cdef Py_ssize_t signal_len(self):
         return self.minidx + self.rlen
+
         
     cdef resize(self, Py_ssize_t sz, Py_ssize_t drop_below=0):
         if drop_below < 0:
@@ -157,13 +162,15 @@ cdef class auto_params:
         self._c_fwd = cfwd
         self.rlen = retainct
       
+
     cdef reserve(self, Py_ssize_t sz):
         if self._ts.shape[0] < sz:
             self.resize(sz)
 
+
     cdef repack(self, Py_ssize_t drop_below=0):
         cdef Py_ssize_t shiftby = drop_below - self.minidx
-        if shiftby < 0:
+        if shiftby <= 0:
             return
         cdef Py_ssize_t updf = self.rlen - shiftby if shiftby < self.rlen else 0
         if updf < self.rlen:
@@ -174,13 +181,16 @@ cdef class auto_params:
             self._r_fwd[:updf] = self._r_fwd[shiftby:self.rlen]
             self._c_bwd[:updf] = self._c_bwd[shiftby:self.rlen]
             self._c_fwd[:updf] = self._c_fwd[shiftby:self.rlen]
-        self.rlen = updf
+            self.rlen -= shiftby
+        else:
+            self.rlen = 0
+            
 
     cdef append(self, double[::1] dat, Py_ssize_t drop_below=0):
         cdef Py_ssize_t startpos = 0 if drop_below <= self.minidx else self.minidx - drop_below
         cdef Py_ssize_t updsz = self.rlen - startpos + dat.shape[0]
         if updsz > self.ts.shape[0]:
-            self.resize(2*self._ts.shape[0] if updsz <= 2*self._ts.shape[0] else 2*updsz, drop_below)
+            self.resize(2 * self._ts.shape[0] if updsz <= 2 * self._ts.shape[0] else 2 * updsz, drop_below)
         # append here
 
 
@@ -199,7 +209,8 @@ cdef class mpstream:
         self.maxsep = maxsep
         self.profilelen = 0
  
-    cdef append(self, auto_params sect):
+
+    cdef append(self, double[::1] ts):
         pass
  
 
