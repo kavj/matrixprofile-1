@@ -89,7 +89,7 @@ cdef mpx_step_eqns(double[::1] ts, double[::1] mu, double[::1] mu_s, double[::1]
         cfwd[i] = ts[i+sseqlen] - mu_s[i+1]
 
 
-cdef class auto_params:
+cdef class AutoParams:
 
     def __cinit__(self, double[::1] ts, Py_ssize_t sseqlen, Py_ssize_t offset=0):
         cdef init_buffer_len = 4096 if ts.shape[0] <= 4096 else 2 * ts.shape[0]
@@ -105,7 +105,10 @@ cdef class auto_params:
         self.sseqct = ts.shape[0] - sseqlen + 1
         self.sseqlen = sseqlen
         self.minidx = offset
- 
+
+
+    cdef inline Py_ssize_t sseqct(self):
+        return self.tslen - self.sseqlen + 1
     
     cdef inline Py_ssize_t total_signal_len(self):
         return self.minidx + self.tslen
@@ -113,31 +116,32 @@ cdef class auto_params:
 
     cdef inline Py_ssize_t total_sseq_ct(self):
         return self.total_signal_len() - self.sseqlen + 1
- 
+
+
     cdef inline Py_ssize_t last_abs_idx(self):
         return self.sseqlen + self.minidx 
 
 
     cdef row_diffs(self, Py_ssize_t begin=-1):
         if begin == -1:
-            return self._r_bwd.get_memview(), self._r_fwd.get_memview()
+            return self.r_bwd.get_memview(), self.r_fwd.get_memview()
         elif begin < self.minidx:
             raise ValueError('index too low')
         elif begin >= self.minidx + self.ret_tslen:
             raise ValueError('index too high')
         cdef Py_ssize_t begpos = begin - self.minidx
-        return self._r_bwd[begpos:self.sseqct-1], self._r_fwd[begpos:self.sseqct-1]
+        return self.r_bwd[begpos:self.sseqct-1], self.r_fwd[begpos:self.sseqct-1]
 
     
     cdef col_diffs(self, Py_ssize_t begin=-1):
         if begin == -1:  
-            return self._c_bwd.get_memview(), self._c_fwd.get_memview()
+            return self.c_bwd.get_memview(), self.c_fwd.get_memview()
         elif begin < self.minidx:
             raise ValueError('index too low')
         elif begin >= self.minidx + self.tslen:
             raise ValueError('index too high')
         cdef Py_ssize_t begpos = begin - self.minidx
-        return self._c_bwd[begpos:self.sseqct-1], self._c_fwd[begpos:self.sseqct-1]
+        return self.c_bwd[begpos:self.sseqct-1], self.c_fwd[begpos:self.sseqct-1]
 
 
     cdef resize(self, Py_ssize_t sz, Py_ssize_t dropct=0):
@@ -211,21 +215,55 @@ cdef class auto_params:
             self.c_fwd[:self.sseqct-1] = self.c_fwd[dropct:old_sseqct-1]
 
 
+    cdef _append_inplace(self, double[::1] dat):
+        if dat.shape[0] == 0:
+            raise ValueError
+        # cdef Py_ssize_t old_tslen = self.tslen
+        # cdef Py_ssize_t old_sseqct = self.sseqct()
+        cdef Py_ssize_t addct
+        cdef old_tslen = self.tslen
+        cdef old_ssct = self.sseqct()
+        if old_tslen < self.sseqlen:
+            addct = self.tslen - self.sseqlen + 1 if self.tslen >= self.sseqlen else 0
+        else:
+            addct = dat.shape[0]
+        self.tslen = old_tslen + dat.shape[0]
+        self.ts[old_tslen:self.tslen] = dat
+        cdef Py_ssize_t dif_addct = addct if old_ssct > 0 else addct - 1
+        moving_mean(ts[self.tslen-ss_add_ct-self.sseqlen+1:self.tslen], self.mu[old_sseqct:self.sseqct])
+        #
+
     cdef append(self, double[::1] dat, Py_ssize_t dropct=0):
+        if dat.shape[0] == 0:
+            raise ValueError
         if dropct > self.tslen or dropct < 0:
             raise ValueError
         cdef Py_ssize_t minsz = self.tslen - dropct + dat.shape[0]
-        if minsz > self.ts.shape[0]:
+        cdef double[::1] mu_s
+        cdef Py_ssize_t strt
+        # shift if necessary
+        if minsz < self.ts.shape[0]:
+            if dropct > 0:
+                self.repack(dropct)
+        else:
             self.resize(2*minsz, dropct)
-        elif dropct > 0:
-            self.repack(dropct)
-        if minsz > 0:
-            self.ts[self.tslen:self.tslen+dat.shape[0]] = dat
-            windowed_mean(self.ts[self.tslen:self.tslen+dat.shape[0]], self.sseqlen) 
-            self.tslen += self.ts.shape[0]
+        cdef Py_ssize_t addct
+        cdef old_tslen = self.tslen
+        cdef old_ssct = self.sseqct()
+        if old_tslen < self.sseqlen:
+            addct = self.tslen - self.sseqlen + 1 if self.tslen >= self.sseqlen else 0
+        else:
+            addct = dat.shape[0]
+        self.tslen = old_tslen + dat.shape[0]
+        self.ts[old_tslen:self.tslen] = dat
+        cdef Py_ssize_t dif_addct = addct if old_ssct > 0 else addct - 1
+        windowed_mean(ts[self.tslen-ss_addct-self.sseqlen+1:self.tslen], self.mu[old_sseqct:self.sseqct])
+        mu_s = array(shape=(dif_add_ct,), itemsize=sizeof(double), format='d')
+        windowed_mean(self.ts[self.tslen-ss_addct:self.tslen-1], mu_s[old_sseqct:self.sseqct-1])
+        # update difference equations
+        
 
-
-cdef class mpstream:
+cdef class MpStream:
 
     def __cinit__(self, Py_ssize_t sseqlen, Py_ssize_t minsep, Py_ssize_t maxsep, Py_ssize_t init_buffer_len=4096):
         if sseqlen < 4:

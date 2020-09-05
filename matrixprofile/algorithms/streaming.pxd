@@ -15,7 +15,7 @@ cdef crosscov(double[::1] out, double[::1] ts, double[::1] mu, double[::1] sig, 
 cdef mpx_step_eqns(double[::1] ts, double[::1] mu, double[::1] mu_s, double[::1] rbwd, double[::1] cbwd, double[::1] rfwd, double[::1] cfwd)
 
 
-cdef class auto_params:
+cdef class AutoParams:
     cdef:
         array ts
         array mu
@@ -29,18 +29,18 @@ cdef class auto_params:
         reserve(self, Py_ssize_t sz)
         repack(self, Py_ssize_t dropct)
         inline Py_ssize_t last_abs_idx(self)
+        inline Py_ssize_T sseqct(self)
      
     cdef readonly:
         Py_ssize_t minidx                  # first index of the in memory portion
         Py_ssize_t total_signal_len(self)  # total length of the signal at this point, including out of memory sections
         Py_ssize_t total_sseq_ct(self)     # total number of subsequences, including the out of memory portion
         Py_ssize_t tslen                   # number of time series elements retained in memory
-        Py_ssize_t sseqct                  # the number of subsequences for which data was retained in memory
         row_diffs(self, Py_ssize_t begin=?)
         col_diffs(self, Py_ssize_t begin=?)
   
 
-cdef class mpstream:
+cdef class MpStream:
     cdef:
         auto_params tssect
         array _mp
