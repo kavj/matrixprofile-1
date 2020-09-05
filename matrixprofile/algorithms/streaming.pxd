@@ -8,23 +8,25 @@ from cython.view cimport array
 
 cdef class auto_params:
     cdef:
-        array _ts
-        array _mu
-        array _invn
-        array _r_bwd
-        array _c_bwd
-        array _r_fwd
-        array _c_fwd
-        Py_ssize_t tslen # number of valid stored time series entries
-        append(self, double[::1] dat, Py_ssize_t drop_below=?)
-        resize(self, Py_ssize_t sz, Py_ssize_t drop_below=?)
+        array ts
+        array mu
+        array invn
+        array r_bwd
+        array c_bwd
+        array r_fwd
+        array c_fwd
+        append(self, double[::1] dat, Py_ssize_t dropct=?)
+        resize(self, Py_ssize_t sz, Py_ssize_t dropct=?)
         reserve(self, Py_ssize_t sz)
-        repack(self, Py_ssize_t drop_below=?)
+        repack(self, Py_ssize_t dropct)
+        inline Py_ssize_t last_abs_idx(self)
      
     cdef readonly:
-        Py_ssize_t minidx
-        Py_ssize_t rlen  # abbreviation for retained len
-        Py_ssize_t signal_len(self)
+        Py_ssize_t minidx                  # first index of the in memory portion
+        Py_ssize_t total_signal_len(self)  # total length of the signal at this point, including out of memory sections
+        Py_ssize_t total_sseq_ct(self)     # total number of subsequences, including the out of memory portion
+        Py_ssize_t tslen                   # number of time series elements retained in memory
+        Py_ssize_t sseqct                  # the number of subsequences for which data was retained in memory
         row_diffs(self, Py_ssize_t begin=?)
         col_diffs(self, Py_ssize_t begin=?)
   
