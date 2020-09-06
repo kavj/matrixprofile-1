@@ -115,12 +115,12 @@ cdef class AutoParams:
         return self.tslen - self.sseqlen + 1 if self.tslen >= self.sseqlen else 0
 
 
-    cdef inline Py_ssize_t total_signal_len(self):
+    cdef inline Py_ssize_t signal_len(self):
         return self.minidx + self.tslen
 
 
-    cdef inline Py_ssize_t total_sseq_ct(self):
-        return self.total_signal_len() - self.sseqlen + 1
+    cdef inline Py_ssize_t signal_sseqct(self):
+        return self.signal_len() - self.sseqlen + 1
 
 
     cdef inline Py_ssize_t last_abs_idx(self):
@@ -194,7 +194,7 @@ cdef class AutoParams:
             raise ValueError
         cdef Py_ssize_t old_tslen = self.tslen
         cdef Py_ssize_t old_ssct = self.sseqct()
-        self.tslen = old_tslen - dropct
+        self.tslen -= dropct
         self.ts[:self.tslen] = self.ts[dropct:old_tslen]
         cdef Py_ssize_t ssct = self.sseqct()
         if ssct > 0:
@@ -221,20 +221,16 @@ cdef class AutoParams:
                 self.repack(dropct)
         else:
             self.resize(2 * minsz, dropct)
-        cdef Py_ssize_t addct
         cdef old_tslen = self.tslen
         cdef old_ssct = self.sseqct()
-        if old_tslen < self.sseqlen:
-            addct = self.sseqct()
-        else:
-            addct = dat.shape[0]
-        self.tslen = old_tslen + dat.shape[0]
+        self.tslen += dat.shape[0]
         self.ts[old_tslen:self.tslen] = dat
-        cdef Py_ssize_t dif_addct = addct if old_ssct > 0 else addct - 1
-        cdef Py_ssize_t tsbeg = old_tslen - self.sseqlen + 1 if old_tslen >= self.sseqlen else 0
-        cdef Py_ssize_t ssbeg = self.sseqct() - addct
-        cdef Py_ssize_t difbeg = self.sseqct() - dif_addct - 1
         cdef Py_ssize_t ssct = self.sseqct()
+        cdef Py_ssize_t addct = ssct if old_ssct == 0 else dat.shape[0]
+        cdef Py_ssize_t dif_addct = addct - 1 if old_ssct == 0 else addct
+        cdef Py_ssize_t tsbeg = 0 if old_ssct == 0 else old_tslen - self.sseqlen + 1
+        cdef Py_ssize_t ssbeg = ssct - addct
+        cdef Py_ssize_t difbeg = ssct - dif_addct - 1
         cdef Py_ssize_t difct = ssct - 1
         windowed_mean(self.ts[tsbeg:self.tslen], self.mu[tsbeg:ssct])
         mu_s = array(shape=(dif_addct,), itemsize=sizeof(double), format='d')
@@ -247,6 +243,7 @@ cdef class AutoParams:
                       self.r_fwd[difbeg:difct],
                       self.c_fwd[difbeg:difct])
 
+
 cdef class MpStream:
 
     def __cinit__(self, Py_ssize_t sseqlen, Py_ssize_t minsep, Py_ssize_t maxsep, double[::1] ts, Py_ssize_t ts_reserve_len=4096):
@@ -258,19 +255,27 @@ cdef class MpStream:
             raise ValueError('max separation must be positive and strictly larger than minsep, received minsep:{minsep}, maxsep:{maxep}')
         elif ts_reserve_len <= 0:
             raise ValueError
+        elif minsep == maxsep:
+            raise ValueError
         self.minsep = minsep
         self.maxsep = maxsep
         self.tsp = AutoParams(ts, sseqlen, ts_reserve_len)
-        self.profilelen = 0
+
 
     cdef inline Py_ssize_t bufferlen(self):
         return self.ts.shape[0]
 
+
+    cdef inline Py_ssize_t profilelen(self):
+        return (self.tslen - self.sseqlen + 1 if self.sseqlen <= self.tslen else 0) if self.tslen > self.minsep else 0
+
+
     cdef append(self, double[::1] ts):
         cdef Py_ssize_t dropct = 0
-        if self.profilelen >= self.maxsep:
+        if self.profilelen() >= self.maxsep:
             # drop anything that cannot be compared with the first element of
             pass
         self.ts.append(ts)
         if ts.signal_len() > self.maxsep:
             pass
+

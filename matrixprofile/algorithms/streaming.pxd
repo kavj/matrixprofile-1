@@ -33,9 +33,9 @@ cdef class AutoParams:
      
     cdef readonly:
         Py_ssize_t minidx                  # first index of the in memory portion
-        Py_ssize_t total_signal_len(self)  # total length of the signal at this point, including out of memory sections
-        Py_ssize_t total_sseq_ct(self)     # total number of subsequences, including the out of memory portion
-        Py_ssize_t tslen                   # number of time series elements retained in memory
+        inline Py_ssize_t signal_len(self)        # total length of the signal at this point, including dropped sections
+        Py_ssize_t tslen                   # number of time series elements currently buffered in memory
+        inline Py_ssize_t signal_sseqct(self)
         row_diffs(self, Py_ssize_t begin=?)
         col_diffs(self, Py_ssize_t begin=?)
   
@@ -49,7 +49,7 @@ cdef class MpStream:
 
     cdef readonly:
         inline Py_ssize_t bufferlen(self)
-        inline Py_ssize_t profilelen
+        inline Py_ssize_t profilelen(self)
         Py_ssize_t sseqlen
         Py_ssize_t minsep
         Py_ssize_t maxsep
