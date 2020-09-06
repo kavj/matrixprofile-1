@@ -8,7 +8,7 @@ from cython.view cimport array
 
 
 cdef windowed_mean(double [::1] ts, double[::1] mu)
-cdef windowed_cent_norm(double[::1] ts, double[::1] mu, double[::1] sig)
+cdef windowed_invcent_norm(double[::1] ts, double[::1] mu, double[::1] sig)
 cdef normalize_one(double[::1] out, double[::1] ts, double mu, double sig)
 cdef normalize_one(double[::1] out, double[::1] ts, double mu, double sig)
 cdef crosscov(double[::1] out, double[::1] ts, double[::1] mu, double[::1] sig, double[::1] cmpseq)
@@ -29,7 +29,7 @@ cdef class AutoParams:
         reserve(self, Py_ssize_t sz)
         repack(self, Py_ssize_t dropct)
         inline Py_ssize_t last_abs_idx(self)
-        inline Py_ssize_T sseqct(self)
+        inline Py_ssize_t sseqct(self)
      
     cdef readonly:
         Py_ssize_t minidx                  # first index of the in memory portion
@@ -42,14 +42,14 @@ cdef class AutoParams:
 
 cdef class MpStream:
     cdef:
-        auto_params tssect
+        AutoParams tsp
         array _mp
         array _mpi
         append(self, double[::1] ts)
 
     cdef readonly:
-        Py_ssize_t bufferlen
-        Py_ssize_t profilelen
+        inline Py_ssize_t bufferlen(self)
+        inline Py_ssize_t profilelen
         Py_ssize_t sseqlen
         Py_ssize_t minsep
         Py_ssize_t maxsep

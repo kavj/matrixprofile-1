@@ -34,7 +34,7 @@ cdef windowed_mean(double [::1] ts, double[::1] mu):
     return mu
 
 
-cdef windowed_cent_norm(double[::1] ts, double[::1] mu, double[::1] sig):
+cdef windowed_invcent_norm(double[::1] ts, double[::1] mu, double[::1] invn):
     cdef Py_ssize_t tslen = ts.shape[0]
     cdef Py_ssize_t windowcount = mu.shape[0]
     if windowcount < 1 or windowcount > tslen: 
@@ -50,8 +50,8 @@ cdef windowed_cent_norm(double[::1] ts, double[::1] mu, double[::1] sig):
         accum = 0
         for j in range(i, i + windowlen):
             accum += (ts[j] - m_)**2
-        sig[i] = sqrt(accum)
-    return sig
+        invn[i] = 1/sqrt(accum)
+    return invn
 
 
 cdef normalize_one(double[::1] out, double[::1] ts, double mu, double sig):
@@ -91,25 +91,30 @@ cdef mpx_step_eqns(double[::1] ts, double[::1] mu, double[::1] mu_s, double[::1]
 
 cdef class AutoParams:
 
-    def __cinit__(self, double[::1] ts, Py_ssize_t sseqlen, Py_ssize_t offset=0):
-        cdef init_buffer_len = 4096 if ts.shape[0] <= 4096 else 2 * ts.shape[0]
-        cdef ss_buffer_len = init_buffer_len - sseqlen + 1
-        self.ts = array(shape=(init_buffer_len,), itemsize=sizeof(double), format='d')
-        self.mu = array(shape=(ss_buffer_len,), itemsize=sizeof(double), format='d')
-        self.invn = array(shape=(ss_buffer_len,), itemsize=sizeof(double), format='d')
-        self.r_bwd = array(shape=(ss_buffer_len-1,), itemsize=sizeof(double), format='d')
-        self.c_bwd = array(shape=(ss_buffer_len-1,), itemsize=sizeof(double), format='d')
-        self.r_fwd = array(shape=(ss_buffer_len-1,), itemsize=sizeof(double), format='d')
-        self.c_fwd = array(shape=(ss_buffer_len-1,), itemsize=sizeof(double), format='d')
+    def __cinit__(self, double[::1] ts, Py_ssize_t sseqlen, Py_ssize_t minreslen = 4096, Py_ssize_t offset=0):
+        cdef init_len
+        if minreslen >= 2 * ts.shape[0]:
+            init_len = minreslen
+        else:
+            init_len = 2 * ts.shape[0]
+        cdef ss_buf_ct = init_len - sseqlen + 1
+        self.ts = array(shape=(init_len,), itemsize=sizeof(double), format='d')
+        self.mu = array(shape=(ss_buf_ct,), itemsize=sizeof(double), format='d')
+        self.invn = array(shape=(ss_buf_ct,), itemsize=sizeof(double), format='d')
+        self.r_bwd = array(shape=(ss_buf_ct-1,), itemsize=sizeof(double), format='d')
+        self.c_bwd = array(shape=(ss_buf_ct-1,), itemsize=sizeof(double), format='d')
+        self.r_fwd = array(shape=(ss_buf_ct-1,), itemsize=sizeof(double), format='d')
+        self.c_fwd = array(shape=(ss_buf_ct-1,), itemsize=sizeof(double), format='d')
         self.tslen = ts.shape[0]
-        self.sseqct = ts.shape[0] - sseqlen + 1
         self.sseqlen = sseqlen
         self.minidx = offset
+        windowed_mean(self.ts, self.mu)
 
 
     cdef inline Py_ssize_t sseqct(self):
-        return self.tslen - self.sseqlen + 1
-    
+        return self.tslen - self.sseqlen + 1 if self.tslen >= self.sseqlen else 0
+
+
     cdef inline Py_ssize_t total_signal_len(self):
         return self.minidx + self.tslen
 
@@ -122,26 +127,18 @@ cdef class AutoParams:
         return self.sseqlen + self.minidx 
 
 
-    cdef row_diffs(self, Py_ssize_t begin=-1):
-        if begin == -1:
-            return self.r_bwd.get_memview(), self.r_fwd.get_memview()
-        elif begin < self.minidx:
-            raise ValueError('index too low')
-        elif begin >= self.minidx + self.ret_tslen:
-            raise ValueError('index too high')
-        cdef Py_ssize_t begpos = begin - self.minidx
-        return self.r_bwd[begpos:self.sseqct-1], self.r_fwd[begpos:self.sseqct-1]
+    cdef row_diffs(self, Py_ssize_t begin=0):
+        cdef Py_ssize_t endpos = self.sseqct()-1
+        if endpos < 0:
+            endpos = 0
+        return self.r_bwd[begin:endpos], self.r_fwd[begin:endpos]
 
-    
+
     cdef col_diffs(self, Py_ssize_t begin=-1):
-        if begin == -1:  
-            return self.c_bwd.get_memview(), self.c_fwd.get_memview()
-        elif begin < self.minidx:
-            raise ValueError('index too low')
-        elif begin >= self.minidx + self.tslen:
-            raise ValueError('index too high')
-        cdef Py_ssize_t begpos = begin - self.minidx
-        return self.c_bwd[begpos:self.sseqct-1], self.c_fwd[begpos:self.sseqct-1]
+        cdef Py_ssize_t endpos = self.sseqct()-1
+        if endpos < 0:
+            endpos = 0
+        return self.c_bwd[begin:endpos], self.c_fwd[begin:endpos]
 
 
     cdef resize(self, Py_ssize_t sz, Py_ssize_t dropct=0):
@@ -160,24 +157,22 @@ cdef class AutoParams:
         cdef array cfwd = array(shape=(dif_sz,), itemsize=sizeof(double), format='d')  
         
         cdef Py_ssize_t old_tslen = self.tslen        
-        cdef Py_ssize_t old_sseqct = self.sseqct
+        cdef Py_ssize_t old_ssct = self.sseqct()
 
         if dropct < old_tslen:
             self.tslen -= dropct
             ts[:self.tslen] = self.ts[dropct:old_tslen]
         else:
             self.tslen = 0
-        if dropct < self.sseqct:
-            self.sseqct -= dropct
-            mu[:self.sseqct] = self.mu[dropct:old_sseqct]
-            invn[:self.sseqct] = self.invn[dropct:old_sseqct]
-        else:
-            self.sseqct = 0
-        if self.sseqct > 1:
-            rbwd[:self.sseqct-1] = self.r_bwd[dropct:old_sseqct-1]
-            rfwd[:self.sseqct-1] = self.r_fwd[dropct:old_sseqct-1]
-            cbwd[:self.sseqct-1] = self.c_bwd[dropct:old_sseqct-1]
-            cfwd[:self.sseqct-1] = self.c_fwd[dropct:old_sseqct-1]
+        cdef Py_ssize_t ssct = self.sseqct()
+        if dropct < old_ssct:
+            mu[:ssct] = self.mu[dropct:old_ssct]
+            invn[:ssct] = self.invn[dropct:old_ssct]
+        if ssct > 1:
+            rbwd[:ssct-1] = self.r_bwd[dropct:old_ssct-1]
+            rfwd[:ssct-1] = self.r_fwd[dropct:old_ssct-1]
+            cbwd[:ssct-1] = self.c_bwd[dropct:old_ssct-1]
+            cfwd[:ssct-1] = self.c_fwd[dropct:old_ssct-1]
         self.ts = ts
         self.mu = mu
         self.invn = invn
@@ -188,7 +183,7 @@ cdef class AutoParams:
       
 
     cdef reserve(self, Py_ssize_t sz):
-        if self._ts.shape[0] < sz:
+        if self.ts.shape[0] < sz:
             self.resize(sz)
 
 
@@ -198,40 +193,19 @@ cdef class AutoParams:
         elif dropct > self.tslen:
             raise ValueError
         cdef Py_ssize_t old_tslen = self.tslen
-        cdef Py_ssize_t old_sseqct = self.sseqct
-        if dropct >= self.sseqct:
-            self.tslen = self.tslen - dropct if self.tslen > dropct else 0
-            self.sseqct = 0
-            self.minidx += dropct
-            return
+        cdef Py_ssize_t old_ssct = self.sseqct()
+        self.tslen = old_tslen - dropct
         self.ts[:self.tslen] = self.ts[dropct:old_tslen]
-        if self.sseqct > 0:
-            self.mu[:self.sseqct] = self.mu[dropct:old_sseqct]
-            self.invn[:self.sseqct] = self.invn[dropct:old_sseqct]
-        if self.sseqct > 1:
-            self.r_bwd[:self.sseqct-1] = self.r_bwd[dropct:old_sseqct-1]
-            self.r_fwd[:self.sseqct-1] = self.r_fwd[dropct:old_sseqct-1]
-            self.c_bwd[:self.sseqct-1] = self.c_bwd[dropct:old_sseqct-1]
-            self.c_fwd[:self.sseqct-1] = self.c_fwd[dropct:old_sseqct-1]
+        cdef Py_ssize_t ssct = self.sseqct()
+        if ssct > 0:
+            self.mu[:ssct] = self.mu[dropct:old_ssct]
+            self.invn[:ssct] = self.invn[dropct:old_ssct]
+        if ssct > 1:
+            self.r_bwd[:ssct-1] = self.r_bwd[dropct:old_ssct-1]
+            self.r_fwd[:ssct-1] = self.r_fwd[dropct:old_ssct-1]
+            self.c_bwd[:ssct-1] = self.c_bwd[dropct:old_ssct-1]
+            self.c_fwd[:ssct-1] = self.c_fwd[dropct:old_ssct-1]
 
-
-    cdef _append_inplace(self, double[::1] dat):
-        if dat.shape[0] == 0:
-            raise ValueError
-        # cdef Py_ssize_t old_tslen = self.tslen
-        # cdef Py_ssize_t old_sseqct = self.sseqct()
-        cdef Py_ssize_t addct
-        cdef old_tslen = self.tslen
-        cdef old_ssct = self.sseqct()
-        if old_tslen < self.sseqlen:
-            addct = self.tslen - self.sseqlen + 1 if self.tslen >= self.sseqlen else 0
-        else:
-            addct = dat.shape[0]
-        self.tslen = old_tslen + dat.shape[0]
-        self.ts[old_tslen:self.tslen] = dat
-        cdef Py_ssize_t dif_addct = addct if old_ssct > 0 else addct - 1
-        moving_mean(ts[self.tslen-ss_add_ct-self.sseqlen+1:self.tslen], self.mu[old_sseqct:self.sseqct])
-        #
 
     cdef append(self, double[::1] dat, Py_ssize_t dropct=0):
         if dat.shape[0] == 0:
@@ -242,44 +216,61 @@ cdef class AutoParams:
         cdef double[::1] mu_s
         cdef Py_ssize_t strt
         # shift if necessary
-        if minsz < self.ts.shape[0]:
+        if minsz <= self.ts.shape[0]:
             if dropct > 0:
                 self.repack(dropct)
         else:
-            self.resize(2*minsz, dropct)
+            self.resize(2 * minsz, dropct)
         cdef Py_ssize_t addct
         cdef old_tslen = self.tslen
         cdef old_ssct = self.sseqct()
         if old_tslen < self.sseqlen:
-            addct = self.tslen - self.sseqlen + 1 if self.tslen >= self.sseqlen else 0
+            addct = self.sseqct()
         else:
             addct = dat.shape[0]
         self.tslen = old_tslen + dat.shape[0]
         self.ts[old_tslen:self.tslen] = dat
         cdef Py_ssize_t dif_addct = addct if old_ssct > 0 else addct - 1
-        windowed_mean(ts[self.tslen-ss_addct-self.sseqlen+1:self.tslen], self.mu[old_sseqct:self.sseqct])
-        mu_s = array(shape=(dif_add_ct,), itemsize=sizeof(double), format='d')
-        windowed_mean(self.ts[self.tslen-ss_addct:self.tslen-1], mu_s[old_sseqct:self.sseqct-1])
-        # update difference equations
-        
+        cdef Py_ssize_t tsbeg = old_tslen - self.sseqlen + 1 if old_tslen >= self.sseqlen else 0
+        cdef Py_ssize_t ssbeg = self.sseqct() - addct
+        cdef Py_ssize_t difbeg = self.sseqct() - dif_addct - 1
+        cdef Py_ssize_t ssct = self.sseqct()
+        cdef Py_ssize_t difct = ssct - 1
+        windowed_mean(self.ts[tsbeg:self.tslen], self.mu[tsbeg:ssct])
+        mu_s = array(shape=(dif_addct,), itemsize=sizeof(double), format='d')
+        windowed_mean(self.ts[tsbeg:self.tslen-1], mu_s[:dif_addct])
+        mpx_step_eqns(self.ts[tsbeg:self.tslen],
+                      self.mu[ssbeg:ssct],
+                      mu_s,
+                      self.r_bwd[difbeg:difct],
+                      self.c_bwd[difbeg:difct],
+                      self.r_fwd[difbeg:difct],
+                      self.c_fwd[difbeg:difct])
 
 cdef class MpStream:
 
-    def __cinit__(self, Py_ssize_t sseqlen, Py_ssize_t minsep, Py_ssize_t maxsep, Py_ssize_t init_buffer_len=4096):
+    def __cinit__(self, Py_ssize_t sseqlen, Py_ssize_t minsep, Py_ssize_t maxsep, double[::1] ts, Py_ssize_t ts_reserve_len=4096):
         if sseqlen < 4:
             raise ValueError
         if minsep <= 0:
             raise ValueError(f'minsep must be strictly positive, received a value of {minsep}')
         elif maxsep <= 0 or maxsep <= minsep:  # should have some default
             raise ValueError('max separation must be positive and strictly larger than minsep, received minsep:{minsep}, maxsep:{maxep}')
-        elif init_buffer_len <= 0:
+        elif ts_reserve_len <= 0:
             raise ValueError
         self.minsep = minsep
         self.maxsep = maxsep
+        self.tsp = AutoParams(ts, sseqlen, ts_reserve_len)
         self.profilelen = 0
- 
+
+    cdef inline Py_ssize_t bufferlen(self):
+        return self.ts.shape[0]
 
     cdef append(self, double[::1] ts):
+        cdef Py_ssize_t dropct = 0
+        if self.profilelen >= self.maxsep:
+            # drop anything that cannot be compared with the first element of
+            pass
         self.ts.append(ts)
-         
-
+        if ts.signal_len() > self.maxsep:
+            pass
