@@ -4,6 +4,9 @@
 from libc.math cimport sqrt
 from matrixprofile.cycore import muinvn
 
+# These are here for convenience purposes for now
+# They can be factored out, as this module should primarily contain the buffering specific codes
+#
 
 cdef windowed_mean(double [::1] ts, double[::1] mu): 
     cdef Py_ssize_t tslen = ts.shape[0]
@@ -90,6 +93,9 @@ cdef mpx_step_eqns(double[::1] ts, double[::1] mu, double[::1] mu_s, double[::1]
 
 
 cdef class AutoParams:
+    """ Descriptor for time series matrix profile calculations using method mpx.
+
+    """
 
     def __cinit__(self, double[::1] ts, Py_ssize_t sseqlen, Py_ssize_t minreslen = 4096, Py_ssize_t offset=0):
         cdef init_len
@@ -244,7 +250,10 @@ cdef class AutoParams:
                       self.c_fwd[difbeg:difct])
 
 
-cdef class MpStream:
+cdef class AutoMProfile:
+    """ auto profile indicates that our comparisons use normalized cross correlation between 2 sections of the same
+        time series
+    """
 
     def __cinit__(self, Py_ssize_t sseqlen, Py_ssize_t minsep, Py_ssize_t maxsep, double[::1] ts, Py_ssize_t ts_reserve_len=4096):
         if sseqlen < 4:
