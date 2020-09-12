@@ -7,8 +7,8 @@ from cython.view cimport array
 #
 
 
-cdef windowed_mean(double [::1] ts, double[::1] mu)
-cdef windowed_invcent_norm(double[::1] ts, double[::1] mu, double[::1] sig)
+cdef windowed_mean(double [::1] ts, double[::1] mu, Py_ssize_t windowlen)
+cdef windowed_invcnorm(double[::1] ts, double[::1] mu, double[::1] sig, Py_ssize_t windowlen)
 cdef normalize_one(double[::1] out, double[::1] ts, double mu, double sig)
 cdef crosscov(double[::1] out, double[::1] ts, double[::1] mu, double[::1] sig, double[::1] cmpseq)
 

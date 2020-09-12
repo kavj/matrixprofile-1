@@ -8,11 +8,13 @@ from matrixprofile.cycore import muinvn
 # They can be factored out, as this module should primarily contain the buffering specific codes
 #
 
-cdef windowed_mean(double [::1] ts, double[::1] mu): 
-    cdef Py_ssize_t tslen = ts.shape[0]
-    cdef Py_ssize_t windowlen = tslen - mu.shape[0] + 1
-    if tslen < windowlen:
-        raise ValueError, "Window length exceeds the number of elements in the time series"
+cdef windowed_mean(double [::1] ts, double[::1] mu, Py_ssize_t windowlen): 
+    if ts.shape[0] < windowlen:
+        raise ValueError(f"Window length exceeds the number of elements in the time series")
+    # safer to test this explicitly than infer the last parameter 
+    cdef Py_ssize_t windowct = ts.shape[0] - windowlen + 1
+    if windowct != mu.shape[0]:
+        raise ValueError(f"subsequence count {windowct} does not match output shape {mu.shape[0]}")
     cdef double accum = ts[0];
     cdef double resid = 0;
     cdef Py_ssize_t i
@@ -24,7 +26,7 @@ cdef windowed_mean(double [::1] ts, double[::1] mu):
         q = accum - p
         resid += ((p - (accum - q)) + (m - q))
     mu[0] = (accum + resid) / windowlen
-    for i in range(windowlen, tslen):
+    for i in range(windowlen, ts.shape[0]):
         m = ts[i - windowlen]
         n = ts[i]
         p = accum - m
@@ -37,18 +39,16 @@ cdef windowed_mean(double [::1] ts, double[::1] mu):
     return mu
 
 
-cdef windowed_invcent_norm(double[::1] ts, double[::1] mu, double[::1] invn):
-    cdef Py_ssize_t tslen = ts.shape[0]
-    cdef Py_ssize_t windowcount = mu.shape[0]
-    if windowcount < 1 or windowcount > tslen: 
-        raise ValueError
+cdef windowed_invcnorm(double[::1] ts, double[::1] mu, double[::1] invn, Py_ssize_t windowlen):
+    cdef Py_ssize_t windowct = ts.shape[0] - windowlen + 1
+    if not (windowct == mu.shape[0] == invn.shape[0]):
+        raise ValueError(f"window count {windowct} does not match output shapes {mu.shape[0]} and {invn.shape[0]}") 
 
-    cdef Py_ssize_t windowlen = tslen - windowcount + 1
-    cdef double accum = 0
+    cdef double accum = 0.0
     cdef double m_
     cdef Py_ssize_t i, j
 
-    for i in range(windowcount):
+    for i in range(windowct):
         m_ = mu[i]
         accum = 0
         for j in range(i, i + windowlen):
@@ -160,9 +160,7 @@ cdef class TSParams:
             self.repack()
         self.endpos += dat.shape[0]
         self._ts[self.beginpos:self.endpos] = dat[:]
-        
-        # self._mu[self.beginpos:self.beginpos+        
-
+        # windowed_mean(self._ts, self._mu, windowlen): 
 
 
 cdef class MProfile:
@@ -172,9 +170,9 @@ cdef class MProfile:
 
     def __cinit__(self, Py_ssize_t sseqlen, Py_ssize_t minsep, Py_ssize_t maxsep, double[::1] ts, Py_ssize_t ts_reserve_len=4096):
         if sseqlen < 4:
-            raise ValueError
+            raise ValueError('subsequence lengths below 4 are not supported')
         if minsep <= 0:
-            raise ValueError(f'minsep must be strictly positive, received a value of {minsep}')
+            raise ValueError(f'negative minsep {minsep} is unsupported')
         elif maxsep <= 0 or maxsep <= minsep:  # should have some default
             raise ValueError('max separation must be positive and strictly larger than minsep, received minsep:{minsep}, maxsep:{maxep}')
         elif ts_reserve_len <= 0:
@@ -185,14 +183,11 @@ cdef class MProfile:
         self.maxsep = maxsep
         self.tsp = TSParams(ts, sseqlen, ts_reserve_len)
 
-
     cdef inline Py_ssize_t bufferlen(self):
         return self.ts.shape[0]
 
-
     cdef inline Py_ssize_t profilelen(self):
         return (self.tslen - self.sseqlen + 1 if self.sseqlen <= self.tslen else 0) if self.tslen > self.minsep else 0
-
 
     cdef append(self, double[::1] ts):
         cdef Py_ssize_t dropct = 0
