@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-#cython: boundscheck=False, cdivision=True, wraparound=False
+#cython: boundscheck=True, cdivision=True, wraparound=True
 from cython.view cimport array
 from libc.math cimport sqrt
 from matrixprofile.cycore import muinvn
@@ -87,16 +87,6 @@ cdef mpx_difeq(double [::1] out, double[::1] ts, double[::1] mu):
         out[i] = ts[i] - mu[i]
 
 
-#    self.r_bwd = array(shape=(ss_buf_ct-1,), itemsize=eltz, format='d')
-#    self.c_bwd = array(shape=(ss_buf_ct-1,), itemsize=eltsz, format='d')
-#    self.r_fwd = array(shape=(ss_buf_ct-1,), itemsize=eltsz, format='d')
-#    self.c_fwd = array(shape=(ss_buf_ct-1,), itemsize=eltsz, format='d')
-#    self.tslen = ts.shape[0]
-#    self.sseqlen = sseqlen
-#    self.minidx = offset
- 
-
-
 cdef class TSParams:
     """ Descriptor for time series matrix profile calculations using method mpx.
 
@@ -109,58 +99,80 @@ cdef class TSParams:
         self._mu = array(shape=(subseqbuflen,), itemsize=eltsz, format='d')
         self._invn = array(shape=(subseqbuflen,), itemsize=eltsz, format='d')
         self.subseqlen = subseqlen
-        self.minindex = 0
+        self.globmin_index = 0
         self.beginpos = 0
-        self.endpos = 0
+        self.eltct = 0  
+
+    cdef inline Py_ssize_t subseqct(self):
+        return self.eltct - self.sseqlen + 1 if self.eltct > self.sseqlen else 0
 
     cdef inline double[::1] ts(self):
-        return self._ts[self.beginpos:self.endpos]
+        return self._ts[self.beginpos:self.beginpos + self.eltct]
 
     cdef inline double[::1] mu(self):
-        return self._mu[self.beginpos:self.beginpos+self.buffered_subseqct()]
+        return self._mu[self.beginpos:self.beginpos+self.subseqct()]
 
     cdef inline double[::1] invn(self):
-        return self._invn[self.beginpos:self.beginpos+self.buffered_subseqct()]
+        return self._invn[self.beginpos:self.beginpos+self.subseqct()]
 
-    cdef inline Py_ssize_t buffered_len(self):
-        return self.endpos - self.beginpos
+    cdef Py_ssize_t max_append_end(self):
+        return self._ts.shape[0] - self.beginpos - self.eltct
 
-    cdef inline Py_ssize_t buffered_subseqct(self):
-        cdef Py_ssize_t bl = self.buffered_len()
-        return bl - self.sseqlen + 1 if bl > self.sseqlen else 0
-
-    cdef inline Py_ssize_t maxindex(self):
-        return self.minindex + self.tslen
-
-    cdef inline Py_ssize_t maxsubseqindex(self):
-        return self.minindex + self.subseqct()
-
-    cdef repack(self, Py_ssize_t dropct=0):
-        if dropct <= 0:
-           raise ValueError(f'negative drop count: {dropct}')
-        elif dropct > self.buffered_len():
-            raise ValueError(f'cannot drop {dropct} elements from {self.buffered_len} elements')
+    cdef dropleading(self, Py_ssize_t dropct):
+        if dropct > self.elct:
+            raise ValueError(f"cannot drop {dropct} elements from {self.eltct} elements")
+        self.minidx += dropct
         self.beginpos += dropct
-        cdef Py_ssize_t tslen = self.buffered_len()
-        cdef Py_ssize_t ssct = self.buffered_subseqct()
-        self._ts[:tslen] = self._ts[self.beginpos:self.endpos]
-        self._mu[:ssct] = self._mu[self.beginpos:self.beginpos+ssct]
-        self._invn[:ssct] = self._invn[self.beginpos:self.beginpos+ssct] 
+        self.eltct -= dropct
+
+    cdef repack(self):
+        cdef Py_ssize_t ssct = self.subseqct()
+        self._ts[:self.eltct] = self.ts()
+        self._mu[:ssct] = self.mu()
+        self._invn[:ssct] = self.invn()
+
+    cdef resize_buffer(self, Py_ssize_t updatedlen):
+        if updatedlen < self.eltct:
+            raise ValueError("updated buffer size is too small to accommodate all elements")
+        elif updatedlen == self._ts.shape[0]:
+            return
+        
+        cdef double[::1] ts_ = self.ts()
+        cdef double[::1] mu_ = self.mu()
+        cdef double[::1] invn_ = self.invn()
+       
+        cdef Py_ssize_t updssbuflen = updatedlen - self.subseqlen + 1 if updatedlen >= self.subseqlen + 1 else 0
+        self._ts = array(shape=(updatedlen,), itemsize=sizeof(double), format='d')
+        self._mu = array(shape=(updssbuflen,), itemsize=sizeof(double), format='d')
+        self._invn = array(shape=(updssbuflen,), itemsize=sizeof(double), format='d')
+        
+        self.beginpos = 0
+        self.ts()[:] = ts_
+        self.mu()[:] = mu_
+        self.invn()[:] = invn_
+
+    cdef inline Py_ssize_t globmax_ts_index(self):
+        return self.minindex + self.eltct
+
+    cdef inline Py_ssize_t globmax_ss_index(self):
+        return self.minindex + self.subseqct()
 
     cdef append(self, double[::1] dat, Py_ssize_t dropct=0):
         if dat.shape[0] == 0:
             raise ValueError('Cannot append from an empty block')
-        if not (0 < dropct < self.buffered_len()):
+        elif not (0 < dropct < self.buffered_len()):
             raise ValueError(f'drop count {dropct} is incompatible with buffered time series length {self.buffered_len()}')
         cdef Py_ssize_t updsz = self.buffered_len() - dropct + dat.shape[0]
         if updsz > self._ts.shape[0]:
             raise ValueError(f'buffer of size {self._ts.shape[0]} is incompatible with required size {updsz}')
-        self.beginpos += dropct
         if self._ts.shape[0] - self.beginpos < self.updsz:
-            self.repack()
-        self.endpos += dat.shape[0]
-        self._ts[self.beginpos:self.endpos] = dat[:]
-        # windowed_mean(self._ts, self._mu, windowlen): 
+            self.repack() #update
+        else:
+            self.beginpos += dropct
+        cdef updend = self.endpos + dat.shape[0]
+        self._ts[self.endpos : updend] = dat[:]
+        self.endpos = updend
+        windowed_mean(self._ts, self._mu, self.subseqlen) 
 
 
 cdef class MProfile:
@@ -193,6 +205,10 @@ cdef class MProfile:
         cdef Py_ssize_t dropct = 0
         if self.profilelen() >= self.maxsep:
             # drop anything that cannot be compared with the first element of
+            pass
+        self.ts.append(ts)
+        if ts.signal_len() > self.maxsep:
+            pass
             pass
         self.ts.append(ts)
         if ts.signal_len() > self.maxsep:

@@ -21,17 +21,18 @@ cdef class TSParams:
         inline double[::1] ts(self)
         inline double[::1] mu(self)
         inline double[::1] invn(self)
-        inline Py_ssize_t buffered_len(self)
-        inline Py_ssize_t buffered_subseqct(self)
-        repack(self, Py_ssize_t dropct=?)
+        dropleading(self, Py_ssize_t dropct)
+        repack(self)
         append(self, double[::1] dat, Py_ssize_t dropct=?)
-     
+        resize_buffer(self, Py_ssize_t updatedlen)
+        Py_ssize_t max_append_end(self)
+
     cdef readonly:
-        inline Py_ssize_t maxindex(self)
-        inline Py_ssize_t maxsubseqindex(self)
-        Py_ssize_t minindex                      
-        inline Py_ssize_t buffered_len(self)        
-        inline Py_ssize_t buffered_subseqct(self)
+        inline Py_ssize_t globmax_ts_index(self)
+        inline Py_ssize_t globmax_ss_index(self)
+        Py_ssize_t globmin_index                      
+        Py_ssize_t eltct 
+        inline Py_ssize_t subseqct(self)
   
 
 cdef class MProfile:
