@@ -59,25 +59,35 @@ class BufferedArray:
             self._seq[:self.count] = self._seq
             self.beginpos = 0
 
-    def shiftby(self, count):
+    def shiftby(self, count, normalize=False, fillval=None):
         """ discard ct elements from memory starting from the current beginning of the in memory
             portion
         """
-        # This is needed to aggregate buffers of different lengths for some cases
-        # In particular, we may wish to shift a time series with n elements using a subsequence length of m by
-        # k elements, where n - m + 1 < k < n.
-        # As a result, we wouldn't have any complete subsequences, but the time series itself would retain some.
-        # the amount shifted would still need to reflect the amount dropped by the longest sequence.
-
+        if count > self.size:
+            raise ValueError('cannot shift by more than total buffer length')
         if count >= self.count:
-            # avoid resetting leading position, in case this is aggregated with other arrays
-            self.beginpos = self._seq.shape[0]
-            self.count = 0
-            self.minindex += count
+            if count > self.count:
+                # shift by
+                if fillval is None:
+                    raise ValueError('cannot shift by an amount greater than the number of live elements without a '
+                                     'fill value')
+                self.count = count - self.count
+                self.beginpos = 0
+                self.seq[:] = fillval
+            else:
+                self.beginpos = 0
+                self.count = 0
         else:
             self.beginpos += count
             self.count -= count
-            self.minindex += count
+            if normalize:
+                self.normalize_buffer()
+        # This is needed for cases aggregating buffers of different lengths. In particular, if we have a time series
+        # and a windowed mean function, where the windowed mean function is over full windows of k elements,
+        # a shift by m: length(timeseries) - k + 1 < m < length(timeseries) we would be left with 0 live elements in
+        # our mean buffer but length(timeseries) - m elements in our time series. In both cases we need to shift the
+        # index by m in order to correctly maintain consistency.
+        self.minindex += count
 
     def resize(self, sz):
         """ resize underlying buffer, raise an error if it would truncate live data """
@@ -89,8 +99,10 @@ class BufferedArray:
 
     def append(self, dat):
         """ append to buffer """
-        if dat.size > self.maxappend:
-            raise ValueError
+        if (self.maxappend < dat.size < self.maxfill):
+            self.normalize_buffer()
+        elif self.maxfill < dat.size:
+            raise ValueError(f'appending {dat.size} elements would overflow available buffer space: {self.maxfill}')
         oldct = self.count
         self.count += dat.size
         self.seq[oldct:] = dat
@@ -186,3 +198,4 @@ class MPXstream:
                 raise ValueError
             self.mp[sectbegin:] = -1
             self.mpi[sectbegin:] = -1
+
