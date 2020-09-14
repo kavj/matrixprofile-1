@@ -1,185 +1,112 @@
 import numpy as np
-from abc import ABC, abstractmethod
+from collections import namedtuple
 
 
-class streamed(ABC):
-    """
-       This is a reference example of a streaming buffer interface.
-       It does not need to be explicitly inherited from. It's here to allow critique of basic
-       interface elements that will be common to all streaming classes.
+class BufferedArray:
+    """ an extremely basic buffered array """
 
-    """
-
-    @property
-    @abstractmethod
-    def minindex(self):
-        """ the absolute time based index of the first buffer element in memory """
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def maxindex(self):
-        """ the absolute time based index of the last buffer element in memory"""
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def maxfillable(self):
-        """ the maximum number of entries that may be appended without resizing."""
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def size(self):
-        """ buffer size """
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def count(self):
-        """ number of in memory elements """
-        raise NotImplementedError
-
-    @abstractmethod
-    def repack(self):
-        """ normalize buffer layout so that retained data spans the positional range
-            0 to size - 1
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def dropleading(self, ct):
-        """ discard ct elements from memory starting from the current beginning of the in memory
-            portion
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def resize(self, updatedsz):
-        """ resize underlying buffer """
-        raise NotImplementedError
-
-    @abstractmethod
-    def append(self, dat, allow_resize=False):
-        """ append to buffer """
-        raise NotImplementedError
-
-
-class TSParams:
-    """ Descriptor for time series matrix profile calculations using method mpx.
-    """
-
-    def __init__(self, subseqlen, bufferlen):
-        self.subseqlen = subseqlen
-        self.minindex = 0  # global min
+    def __init__(self, size, dtype='d', minindex=0):
+        self.size = bufferlen
+        self.minindex = minindex
+        self._seq = np.empty(size, dtype=dtype)
         self.count = 0
         self.beginpos = 0
-        ssbuflen = max(bufferlen - subseqlen + 1, 0)
-        self._ts = np.empty(bufferlen, dtype='d')
-        self._mu = np.empty(ssbuflen, dtype='d')
-        self._invn = np.empty(ssbuflen, dtype='d')
-
 
     @property
-    def ts(self):
-        return self._ts[self.beginpos:self.beginpos + self.count]
-
-    @property
-    def mu(self):
-        return self._mu[self.beginpos:self.beginpos + self.subseqct]
-
-    @property
-    def invn(self):
-        return self._invn[self.beginpos:self.beginpos + self.subseqct]
+    def seq(self):
+        return self.seq[self.beginpos:self.beginpos:self.beginpos + self.count]
 
     @property
     def maxindex(self):
         """ the absolute time based index of the last buffer element in memory"""
-        return self.minindex + self.size
+        return self.minindex + self.count if self.count != 0 else None
 
     @property
-    def maxfillable(self):
-        """ the maximum number of free entries that may be  appended without resizing."""
-
-        # This might still require repacking.
-        return self.size - self.count
+    def maxfill(self):
+        """ number of unused entries"""
+        return self._seq.shape[0] - self.count
 
     @property
-    def size(self):
-        """ buffer size """
-        return self._ts.shape[0]
+    def maxappend(self):
+        """ number of unused entries located at the end of the buffer """
+        return self._seq.shape[0] - self.count - self.beginpos
 
-    @property
-    def subseqct(self):
-        return max(self.count - self.subseqlen + 1, 0)
+    # dunder methods are added for debugging convenience.
+    # Be warned, these create views on every call
 
-    def dropleading(self, ct):
+    def __iter__(self):
+        return iter(self.seq)
+
+    def __len__(self):
+        """ number of in memory elements
+            note: len is supposed to match the number of elements returned by iter
+        """
+        return self.seq.shape[0]
+
+    def __getitem__(self, item):
+        return self.seq[item]
+
+    def __setitem__(self, key, value):
+        self.seq[key] = value
+
+    def normalize_buffer(self):
+        """ normalize buffer layout so that retained data spans the positional range
+            0 to size - 1.
+            Since this is an inplace op, it can invalidate python iterators to this object.
+            It is intentionally left as an explicit op.
+        """
+        if self.count > 0 and self.beginpos != 0:
+            self._seq[:self.count] = self._seq
+            self.beginpos = 0
+
+    def shiftby(self, count):
         """ discard ct elements from memory starting from the current beginning of the in memory
             portion
         """
-        if dropct > self.count:
-            raise ValueError(f"cannot drop {dropct} elements from {self.count} elements")
-        self.minindex += dropct
-        self.beginpos += dropct
-        self.count -= dropct
+        # This is needed to aggregate buffers of different lengths for some cases
+        # In particular, we may wish to shift a time series with n elements using a subsequence length of m by
+        # k elements, where n - m + 1 < k < n.
+        # As a result, we wouldn't have any complete subsequences, but the time series itself would retain some.
+        # the amount shifted would still need to reflect the amount dropped by the longest sequence.
 
-    def repack(self):
-        """ normalize buffer layout so that retained data spans the positional range
-            0 to size - 1
-        """
-
-        if self.count > 0 and self.beginpos != 0:
-            self._ts[:self.count] = self.ts
-            ssct = self.subseqct
-            self._mu[:ssct] = self.mu
-            self._invn[:ssct] = self.invn
-            self.beginpos = 0
+        if count >= self.count:
+            # avoid resetting leading position, in case this is aggregated with other arrays
+            self.beginpos = self._seq.shape[0]
+            self.count = 0
+            self.minindex += count
+        else:
+            self.beginpos += count
+            self.count -= count
+            self.minindex += count
 
     def resize(self, sz):
-        """ resize underlying buffer """
-        if self.count > sz:
+        """ resize underlying buffer, raise an error if it would truncate live data """
+        if sz < self.count:
             raise ValueError
-        elif sz != self.size:
-            ts_ = self.ts
-            mu_ = self.mu
-            invn_ = self.invn
-            self.beginpos = 0
-            ssbufsz = max(sz - self.sseqlen + 1, 0)
-            self._ts = np.empty(sz, dtype='d')
-            self._mu = np.empty(ssbufsz, dtype='d')
-            self._invn = np.empty(ssbufsz, dtype='d')
-            self.ts[:] = ts_
-            self.mu[:] = mu_
-            self.invn[:] = invn_
-        elif self.beginpos != 0:
-            self.repack()
+        dat = self.seq
+        self._seq = np.empty(sz, dtype=self._seq.dtype)
+        self.seq[:] = dat
 
-    @property
-    def maxssindex(self):
-        return self.minindex + self.subseqct
-
-    def append(self, dat, allow_resize=False):
-        if 0 < dat.shape[0]:
-            if dat.shape[0] <= self.maxfillable:
-                if self.size - self.count < dat.shape[0]:
-                    self.repack()
-            elif allow_resize:
-                minreq = self.count + dat.shape[0]
-                self.resize(2 * minreq)
-            else:
-                raise ValueError
-            sectbegin = self.sseqct
-            self.count += dat.shape[0]
-            windowed_mean(self.ts[sectbegin:], self.mu[sectbegin:])
-            windowed_invcnorm(self.ts[sectbegin:], self.mu[sectbegin:], self.invn[sectbegin:])
+    def append(self, dat):
+        """ append to buffer """
+        if dat.size > self.maxappend:
+            raise ValueError
+        oldct = self.count
+        self.count += dat.size
+        self.seq[oldct:] = dat
 
 
-class MProfile:
+mpxautobufs = namedtuple('mpxautobufs', ['mp', 'mpi', 'ts', 'mu', 'invn', 'rbwd', 'rfwd', 'cbwd', 'cfwd'])
+
+
+class MPXstream:
     """ auto profile indicates that our comparisons use normalized cross correlation between 2 sections of the same
         time series
+
+        may refactor later to share things between profile types
     """
 
-    def __init__(self, sseqlen, minsep, maxsep, minbufferlen=None):
+    def __init__(self, sseqlen, minsep, maxsep, minbufsz =None):
         if sseqlen < 4:
             raise ValueError('subsequence lengths below 4 are not supported')
         elif not (0 < minsep < maxsep):
@@ -187,84 +114,75 @@ class MProfile:
         # This object indexes by subsequence, not by time series element
         self.minsep = minsep
         self.maxsep = maxsep
-        self.count = 0
-        self.beginpos = 0
-        self.minindex = 0
-        if minbufferlen is None:
-            minbufferlen = (maxsep - minsep) + sseqlen - 1
-        self.timeseries = TSParams(sseqlen, bufferlen=minbufferlen+sseqlen-1)
-        self._mp = np.empty(minbufferlen, dtype='d')
-        self._mpi = np.empty(minbufferlen, dtype='q')
+        if minbufsz is None:
+            minbufsz = (maxsep - minsep) + sseqlen - 1
+        # this makes it easy to iterate over all buffers and apply something like a shift operation
+        # I don't currently inherit from named tuple, because it adds restrictions and exposes too many operations.
+        self.buffers = mpxautobufs(mp=BufferedArray(minbufsz),
+                                   mpi=BufferedArray(minbufsz, dtype='q'),
+                                   ts=BufferedArray(minbufsz + sseqlen - 1),
+                                   mu=BufferedArray(minbufsz),
+                                   invn=BufferedArray(minbufsz),
+                                   rbwd=BufferedArray(minbufsz),
+                                   rfwd=BufferedArray(minbufsz),
+                                   cbwd=BufferedArray(minbufsz),
+                                   cfwd=BufferedArray(minbufsz))
+
+    @property
+    def count(self):
+        return self.buffers.mp.count
 
     @property
     def mp(self):
-        return self._mp[self.beginpos:self.beginpos+self.count]
+        return self.buffers.mp.seq
 
     @property
     def mpi(self):
-        return self._mpi[self.beginpos:self.beginpos+self.count]
-
-    @property
-    def maxindex(self):
-        """ the absolute time based index of the last buffer element in memory"""
-        return self.minindex + self.size
-
-    @property
-    def maxfillable(self):
-        """ the maximum number of free entries that may be  appended without resizing."""
-        return self.size - self.count
+        return self.buffers.mpi.seq
 
     @property
     def size(self):
         """ buffer size """
-        return self._mp.shape[0]
+        return self.buffers.mp.size
 
-    def dropleading(self, ct):
+    def drop(self, ct):
         """ discard ct elements from memory starting from the current beginning of the in memory
             portion
+
+            I may need to adjust buffers
         """
-        if dropct > self.count:
-            raise ValueError(f"cannot drop {ct} elements from {self.count} elements")
-        self.minindex += dropct
-        self.beginpos += dropct
-        self.count -= dropct
+        buffers = self.buffers
+        for buf in self.buffers:
+            buf.drop(ct)
 
     def repack(self):
         """ normalize buffer layout so that retained data spans the positional range
             0 to size - 1
         """
 
-        if self.count > 0 and self.beginpos != 0:
-            self._ts[:self.count] = self.ts
-            ssct = self.subseqct
-            self._mu[:ssct] = self.mu
-            self._invn[:ssct] = self.invn
-            self.beginpos = 0
+        for buf in self.buffers:
+            buf.repack()
 
     def resize(self, sz):
         """ resize underlying buffer """
         if self.count > sz:
             raise ValueError
-        elif sz != self.size:
-            mp_ = self.mp
-            mpi_ = self.mpi
-            self.beginpos = 0
-            self.mp[:] = mp_
-            self.mpi[:] = mpi_
-        elif self.beginpos != 0:
+        elif sz == self.size:
             self.repack()
+        else:
+            # these need a per buffer adjustment factor which I will add
+            for buf in self.buffers:
+                buf.resize(sz)
 
     def append(self, dat, allow_resize=False):
-        if 0 < dat.shape[0]:
-            if dat.shape[0] <= self.maxfillable:
-                if self.size - self.count < dat.shape[0]:
+        if 0 < dat.size:
+            if dat.size <= self.maxappendable:
+                if self.size - self.count < dat.size:
                     self.repack()
             elif allow_resize:
-                minreq = self.count + dat.shape[0]
+                minreq = self.count + dat.size
                 self.resize(2 * minreq)
             else:
                 raise ValueError
-            sectbegin = self.count
-            self.count += ts.shape[0]
             self.mp[sectbegin:] = -1
             self.mpi[sectbegin:] = -1
