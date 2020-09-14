@@ -6,7 +6,7 @@ class BufferedArray:
     """ an extremely basic buffered array """
 
     def __init__(self, size, dtype='d', minindex=0):
-        self.size = bufferlen
+        self.size = size
         self.minindex = minindex
         self._seq = np.empty(size, dtype=dtype)
         self.count = 0
@@ -14,12 +14,12 @@ class BufferedArray:
 
     @property
     def seq(self):
-        return self.seq[self.beginpos:self.beginpos:self.beginpos + self.count]
+        return self._seq[self.beginpos:self.beginpos + self.count]
 
     @property
     def maxindex(self):
         """ the absolute time based index of the last buffer element in memory"""
-        return self.minindex + self.count if self.count != 0 else None
+        return self.minindex + self.count - 1 if self.count != 0 else None
 
     @property
     def maxfill(self):
@@ -56,7 +56,7 @@ class BufferedArray:
             It is intentionally left as an explicit op.
         """
         if self.count > 0 and self.beginpos != 0:
-            self._seq[:self.count] = self._seq
+            self._seq[:self.count] = self.seq
             self.beginpos = 0
 
     def shiftby(self, count, normalize=False, fillval=None):
@@ -65,18 +65,17 @@ class BufferedArray:
         """
         if count > self.size:
             raise ValueError('cannot shift by more than total buffer length')
-        if count >= self.count:
-            if count > self.count:
-                # shift by
-                if fillval is None:
-                    raise ValueError('cannot shift by an amount greater than the number of live elements without a '
-                                     'fill value')
+        elif count > self.count:
+            if fillval is None:
+                raise ValueError('cannot shift by an amount greater than the number of live elements without a '
+                                 'fill value')
+            else:
                 self.count = count - self.count
                 self.beginpos = 0
                 self.seq[:] = fillval
-            else:
-                self.beginpos = 0
-                self.count = 0
+        elif count == self.count:
+            self.beginpos = 0
+            self.count = 0
         else:
             self.beginpos += count
             self.count -= count
@@ -92,7 +91,7 @@ class BufferedArray:
     def resize(self, sz):
         """ resize underlying buffer, raise an error if it would truncate live data """
         if sz < self.count:
-            raise ValueError
+            raise ValueError(f'buffer size {sz} is too small to accommodate {self.count} live elements')
         dat = self.seq
         self._seq = np.empty(sz, dtype=self._seq.dtype)
         self.seq[:] = dat
@@ -180,7 +179,7 @@ class MPXstream:
         if self.count > sz:
             raise ValueError
         elif sz == self.size:
-            self.repack()
+            self.normalize_buffer()
         else:
             # these need a per buffer adjustment factor which I will add
             for buf in self.buffers:
