@@ -12,8 +12,8 @@ from matrixprofile.cycore import muinvn
 cpdef windowed_mean(double [::1] ts, double[::1] mu, Py_ssize_t windowlen):
      
     # this could be inferred, but it's safer this way
-    if ts.shape[0] < windowlen or ts.shape[0] - windowlen + 1 != mu.shape[0]:
-        raise ValueError(f"Window length exceeds the number of elements in the time series")
+    if ts.shape[0] < windowlen:
+        raise ValueError(f"Window length {windowlen} exceeds the number of elements in the time series {ts.shape[0]}")
     # safer to test this explicitly than infer the last parameter 
     cdef Py_ssize_t windowct = ts.shape[0] - windowlen + 1
     if windowct != mu.shape[0]:
@@ -92,11 +92,11 @@ cpdef mpx_difeq(double [::1] out, double[::1] ts, double[::1] mu):
 
 cpdef mpx_inner(double[::1] cov, double[::1] r_bwd, double[::1] r_fwd, double[::1] c_bwd, double[::1] c_fwd, double[::1] invn, double[::1] mp, int[::1] mpi, int minlag, int roffset):   
     cdef int i, j, diag, row, col
-    cdef double cov_ 
-    cdef subseqct = mp.shape[0]
+    cdef double cov_, corr_ 
+    cdef int subseqct = mp.shape[0]
     # check full requirements for shape mismatches
-    if not (cov.shape[0] - minlag == mp.shape[0] == mpi.shape[0] == invn.shape[0]):
-        raise ValueError
+    if not ((cov.shape[0] + minlag) == mp.shape[0] == mpi.shape[0] == invn.shape[0]):
+        raise ValueError(f'these should match, cov-minlag:{cov.shape[0]+minlag}, mp:{mp.shape[0]}, mpi:{mpi.shape[0]}, invn:{invn.shape[0]}')
     for diag in range(minlag, subseqct):
         cov_ = cov[diag-minlag]
         for row in range(subseqct - diag):
