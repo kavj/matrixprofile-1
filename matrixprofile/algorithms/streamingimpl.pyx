@@ -90,14 +90,15 @@ cpdef mpx_difeq(double [::1] out, double[::1] ts, double[::1] mu):
         out[i] = ts[i] - mu[i]
 
 
-cpdef mpx_inner(double[::1] cov, double[::1] r_bwd, double[::1] r_fwd, double[::1] c_bwd, double[::1] c_fwd, double[::1] invn, double[::1] mp, int[::1] mpi, int minlag, int roffset):
-    
+cpdef mpx_inner(double[::1] cov, double[::1] r_bwd, double[::1] r_fwd, double[::1] c_bwd, double[::1] c_fwd, double[::1] invn, double[::1] mp, int[::1] mpi, int minlag, int roffset):   
     cdef int i, j, diag, row, col
+    cdef double cov_ 
     cdef subseqct = mp.shape[0]
     # check full requirements for shape mismatches
     if not (cov.shape[0] - minlag == mp.shape[0] == mpi.shape[0] == invn.shape[0]):
         raise ValueError
     for diag in range(minlag, subseqct):
+        cov_ = cov[diag-minlag]
         for row in range(subseqct - diag):
             col = diag + row
             if row > 0: 
