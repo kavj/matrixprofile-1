@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 #cython: boundscheck=True, cdivision=True, wraparound=True
+import numpy as np
 from cython.view cimport array
 from libc.math cimport sqrt
 from matrixprofile.cycore import muinvn
@@ -8,7 +9,7 @@ from matrixprofile.cycore import muinvn
 # They can be factored out, as this module should primarily contain the buffering specific codes
 #
 
-cdef windowed_mean(double [::1] ts, double[::1] mu, Py_ssize_t windowlen): 
+cpdef windowed_mean(double [::1] ts, double[::1] mu, Py_ssize_t windowlen):
     if ts.shape[0] < windowlen:
         raise ValueError(f"Window length exceeds the number of elements in the time series")
     # safer to test this explicitly than infer the last parameter 
@@ -39,7 +40,7 @@ cdef windowed_mean(double [::1] ts, double[::1] mu, Py_ssize_t windowlen):
     return mu
 
 
-cdef windowed_invcnorm(double[::1] ts, double[::1] mu, double[::1] invn, Py_ssize_t windowlen):
+cpdef windowed_invcnorm(double[::1] ts, double[::1] mu, double[::1] invn, Py_ssize_t windowlen):
     cdef Py_ssize_t windowct = ts.shape[0] - windowlen + 1
     if not (windowct == mu.shape[0] == invn.shape[0]):
         raise ValueError(f"window count {windowct} does not match output shapes {mu.shape[0]} and {invn.shape[0]}") 
@@ -57,13 +58,13 @@ cdef windowed_invcnorm(double[::1] ts, double[::1] mu, double[::1] invn, Py_ssiz
     return invn
 
 
-cdef normalize_one(double[::1] out, double[::1] ts, double mu, double sig):
+cpdef normalize_one(double[::1] out, double[::1] ts, double mu, double sig):
     cdef Py_ssize_t i,j
     for i in range(out.shape[0]):
         out[i] = (ts[i] - mu) / sig
 
 
-cdef crosscov(double[::1] out, double[::1] ts, double[::1] mu, double[::1] sig, double[::1] cmpseq):
+cpdef crosscov(double[::1] out, double[::1] ts, double[::1] mu, double[::1] sig, double[::1] cmpseq):
     cdef Py_ssize_t sseqct = out.shape[0]
     cdef double accum, m_
     if sseqct != mu.shape[0] or sseqct != sig.shape[0]:
@@ -79,7 +80,7 @@ cdef crosscov(double[::1] out, double[::1] ts, double[::1] mu, double[::1] sig, 
         out[i] = accum
 
 
-cdef mpx_difeq(double [::1] out, double[::1] ts, double[::1] mu):
+cpdef mpx_difeq(double [::1] out, double[::1] ts, double[::1] mu):
     if not (ts.shape[0] == mu.shape[0] == out.shape[0]):
         raise ValueError(f'time series of shape {ts.shape[0]} is incompatible with mean vector mu of shape {mu.shape[0]} and output shape {out.shape[0]}')
     cdef Py_ssize_t i
@@ -87,130 +88,120 @@ cdef mpx_difeq(double [::1] out, double[::1] ts, double[::1] mu):
         out[i] = ts[i] - mu[i]
 
 
-cdef class TSParams:
-    """ Descriptor for time series matrix profile calculations using method mpx.
+cpdef mpx_inner(double[::1] cov, double[::1] r_bwd, double[::1] r_fwd, double[::1] c_bwd, double[::1] c_fwd, double[::1] invn, double[::1] mp, int[::1] mpi, int minlag, int roffset):
+    
+    cdef int i, j, diag, row, col
+    cdef subseqct = mp.shape[0]
+    # check full requirements for shape mismatches
+    if not (cov.shape[0] - minlag == mp.shape[0] == mpi.shape[0] == invn.shape[0]):
+        raise ValueError
+    for diag in range(minlag, subseqct):
+        for row in range(subseqct - diag):
+            col = diag + row
+            if row > 0: 
+                cov_ -= r_bwd[row-1] * c_bwd[col-1] 
+                cov_ += r_fwd[row-1] * c_fwd[col-1]
+            corr_ = cov_ * invn[row] * invn[col]
+            if corr_ > 1.0:
+                corr_ = 1.0
+            if corr_ > mp[row]:
+                mp[row] = corr_ 
+                mpi[row] = col + roffset
+            if corr_ > mp[col]:
+                mp[col] = corr_
+                mpi[col] = row + roffset
+    
+
+cpdef mpx_parallel(double[::1] ts, int w, int cross_correlation, int n_jobs):
+    """
+    The MPX algorithm computes the matrix profile without using the FFT. Right
+    now it only supports single dimension self joins. 
+ 
+    The experimental version uses a slightly simpler factorization in an effort to 
+    avoid cases of very ill conditioned products on time series with streams of zeros
+    or missing data.
+
+    Parameters
+    ----------
+    ts : array_like
+        The time series to compute the matrix profile for.
+    w : int
+        The window size.
+    cross_correlation : int
+        Flag (0, 1) to determine if cross_correlation distance should be
+        returned. It defaults to Euclidean Distance (0).
+    n_jobs : int, Default = 1
+        Number of cpu cores to use.
+    
+    Returns
+    -------
+    (array_like, array_like) :
+        The matrix profile (distance profile, profile index).
 
     """
+    if w < 2: 
+        raise ValueError('subsequence length is too short to admit a normalized representation')
+    
+    cdef int i, j, diag, row, col
+    cdef double cov_, corr_
+    
+    cdef int minlag = w // 4
+    cdef int subseqcount = ts.size - w + 1
 
-    def __cinit__(self, Py_ssize_t subseqlen, Py_ssize_t subseqbuflen):
-        cdef Py_ssize_t eltsz = sizeof(double)
-        cdef Py_ssize_t tsbuflen = subseqbuflen + subseqlen - 1
-        self._ts = array(shape=(tsbuflen,), itemsize=eltsz, format='d')
-        self._mu = array(shape=(subseqbuflen,), itemsize=eltsz, format='d')
-        self._invn = array(shape=(subseqbuflen,), itemsize=eltsz, format='d')
-        self.subseqlen = subseqlen
-        self.globmin_index = 0
-        self.beginpos = 0
-        self.eltct = 0  
+    if subseqcount < 1 + minlag:  
+        raise ValueError('time series is too short relative to subsequence length w')
+    
+    cdef double[::1] mu, mu_s, invnorm
+    mu, invnorm  = muinvn(ts, w)
+    mu_s, _ = muinvn(ts[:ts.size-1], w-1)
+    mprof_ = np.empty(subseqcount, dtype='d')
+    mprofidx_ = np.empty(subseqcount, dtype='i')
+    cdef double[::1] mprof = mprof_
+    cdef int[::1] mprofidx = mprofidx_ 
 
-    cdef inline Py_ssize_t subseqct(self):
-        return self.eltct - self.sseqlen + 1 if self.eltct > self.sseqlen else 0
+    for i in range(subseqcount):
+        mprof[i] = -1.0
 
-    cdef inline double[::1] ts(self):
-        return self._ts[self.beginpos:self.beginpos + self.eltct]
+    cdef double[::1] r_bwd = array(shape=(subseqcount-1,), itemsize=sizeof(double), format='d')
+    cdef double[::1] c_bwd = array(shape=(subseqcount-1,), itemsize=sizeof(double), format='d')
+    cdef double[::1] r_fwd = array(shape=(subseqcount-1,), itemsize=sizeof(double), format='d')
+    cdef double[::1] c_fwd = array(shape=(subseqcount-1,), itemsize=sizeof(double), format='d')
+   
+    for i in range(subseqcount-1):
+        r_bwd[i] = ts[i] - mu[i]
+        c_bwd[i] = ts[i] - mu_s[i+1]
+        r_fwd[i] = ts[i+w] - mu[i+1]
+        c_fwd[i] = ts[i+w] - mu_s[i+1]
 
-    cdef inline double[::1] mu(self):
-        return self._mu[self.beginpos:self.beginpos+self.subseqct()]
+    cdef double[::1] first_row = array(shape=(w,), itemsize=sizeof(double), format='d')
+    cdef double m_ = mu[0]
+    for i in range(w):
+        first_row[i] = ts[i] - m_     
 
-    cdef inline double[::1] invn(self):
-        return self._invn[self.beginpos:self.beginpos+self.subseqct()]
+    for diag in range(minlag, subseqcount):
+        cov_ = 0 
+        for i in range(diag, diag + w):
+            cov_ += (ts[i] - mu[diag]) * first_row[i-diag]
 
-    cdef Py_ssize_t max_append_end(self):
-        return self._ts.shape[0] - self.beginpos - self.eltct
+        for row in range(subseqcount - diag):
+            col = diag + row
+            if row > 0: 
+                cov_ -= r_bwd[row-1] * c_bwd[col-1] 
+                cov_ += r_fwd[row-1] * c_fwd[col-1]
+            corr_ = cov_ * invnorm[row] * invnorm[col]
+            if corr_ > 1.0:
+                corr_ = 1.0
+            if corr_ > mprof[row]:
+                mprof[row] = corr_ 
+                mprofidx[row] = col 
+            if corr_ > mprof[col]:
+                mprof[col] = corr_
+                mprofidx[col] = row
+    
+    if cross_correlation == 0:
+        for i in range(subseqcount):
+            mprof[i] = sqrt(2 * w * (1 - mprof[i]))
+    
+    return mprof_, mprofidx_
 
-    cdef dropleading(self, Py_ssize_t dropct):
-        if dropct > self.elct:
-            raise ValueError(f"cannot drop {dropct} elements from {self.eltct} elements")
-        self.minidx += dropct
-        self.beginpos += dropct
-        self.eltct -= dropct
-
-    cdef repack(self):
-        cdef Py_ssize_t ssct = self.subseqct()
-        self._ts[:self.eltct] = self.ts()
-        self._mu[:ssct] = self.mu()
-        self._invn[:ssct] = self.invn()
-
-    cdef resize_buffer(self, Py_ssize_t updatedlen):
-        if updatedlen < self.eltct:
-            raise ValueError("updated buffer size is too small to accommodate all elements")
-        elif updatedlen == self._ts.shape[0]:
-            return
-        
-        cdef double[::1] ts_ = self.ts()
-        cdef double[::1] mu_ = self.mu()
-        cdef double[::1] invn_ = self.invn()
-       
-        cdef Py_ssize_t updssbuflen = updatedlen - self.subseqlen + 1 if updatedlen >= self.subseqlen + 1 else 0
-        self._ts = array(shape=(updatedlen,), itemsize=sizeof(double), format='d')
-        self._mu = array(shape=(updssbuflen,), itemsize=sizeof(double), format='d')
-        self._invn = array(shape=(updssbuflen,), itemsize=sizeof(double), format='d')
-        
-        self.beginpos = 0
-        self.ts()[:] = ts_
-        self.mu()[:] = mu_
-        self.invn()[:] = invn_
-
-    cdef inline Py_ssize_t globmax_ts_index(self):
-        return self.minindex + self.eltct
-
-    cdef inline Py_ssize_t globmax_ss_index(self):
-        return self.minindex + self.subseqct()
-
-    cdef append(self, double[::1] dat, Py_ssize_t dropct=0):
-        if dat.shape[0] == 0:
-            raise ValueError('Cannot append from an empty block')
-        elif not (0 < dropct < self.buffered_len()):
-            raise ValueError(f'drop count {dropct} is incompatible with buffered time series length {self.buffered_len()}')
-        cdef Py_ssize_t updsz = self.buffered_len() - dropct + dat.shape[0]
-        if updsz > self._ts.shape[0]:
-            raise ValueError(f'buffer of size {self._ts.shape[0]} is incompatible with required size {updsz}')
-        if self._ts.shape[0] - self.beginpos < self.updsz:
-            self.repack() #update
-        else:
-            self.beginpos += dropct
-        cdef updend = self.endpos + dat.shape[0]
-        self._ts[self.endpos : updend] = dat[:]
-        self.endpos = updend
-        windowed_mean(self._ts, self._mu, self.subseqlen) 
-
-
-cdef class MProfile:
-    """ auto profile indicates that our comparisons use normalized cross correlation between 2 sections of the same
-        time series
-    """
-
-    def __cinit__(self, Py_ssize_t sseqlen, Py_ssize_t minsep, Py_ssize_t maxsep, double[::1] ts, Py_ssize_t ts_reserve_len=4096):
-        if sseqlen < 4:
-            raise ValueError('subsequence lengths below 4 are not supported')
-        if minsep <= 0:
-            raise ValueError(f'negative minsep {minsep} is unsupported')
-        elif maxsep <= 0 or maxsep <= minsep:  # should have some default
-            raise ValueError('max separation must be positive and strictly larger than minsep, received minsep:{minsep}, maxsep:{maxep}')
-        elif ts_reserve_len <= 0:
-            raise ValueError
-        elif minsep == maxsep:
-            raise ValueError
-        self.minsep = minsep
-        self.maxsep = maxsep
-        self.tsp = TSParams(ts, sseqlen, ts_reserve_len)
-
-    cdef inline Py_ssize_t bufferlen(self):
-        return self.ts.shape[0]
-
-    cdef inline Py_ssize_t profilelen(self):
-        return (self.tslen - self.sseqlen + 1 if self.sseqlen <= self.tslen else 0) if self.tslen > self.minsep else 0
-
-    cdef append(self, double[::1] ts):
-        cdef Py_ssize_t dropct = 0
-        if self.profilelen() >= self.maxsep:
-            # drop anything that cannot be compared with the first element of
-            pass
-        self.ts.append(ts)
-        if ts.signal_len() > self.maxsep:
-            pass
-            pass
-        self.ts.append(ts)
-        if ts.signal_len() > self.maxsep:
-            pass
 
