@@ -59,6 +59,14 @@ class BufferedArray:
             self._seq[:self.count] = self.seq
             self.beginpos = 0
 
+    def fill(self, x, count):
+        if count > self.maxfill:
+            raise ValueError
+        elif count > self.maxappend:
+            self.normalize_buffer()
+        self.count += count
+        self.seq[-count:] = x
+
     def shiftby(self, count, normalize=False, fillval=None):
         """ discard ct elements from memory starting from the current beginning of the in memory
             portion
@@ -96,18 +104,82 @@ class BufferedArray:
         self._seq = np.empty(sz, dtype=self._seq.dtype)
         self.seq[:] = dat
 
-    def append(self, dat):
-        """ append to buffer """
-        if (self.maxappend < dat.size < self.maxfill):
+    def fillable(self, sz, allow_resize=True):
+        if sz > self.maxfill:
+            if allow_resize:
+                self.resize(2*(self.count + sz))
+            else:
+                raise ValueError
+        elif sz > self.maxappend:
             self.normalize_buffer()
-        elif self.maxfill < dat.size:
-            raise ValueError(f'appending {dat.size} elements would overflow available buffer space: {self.maxfill}')
+        self.count += sz
+        return self.seq[-sz:]         
+
+    def append(self, dat, allow_resize=True):
+        """ append to buffer """
+        reqspace = dat.size
+        if self.maxfill < reqspace:
+            if allow_resize:
+                self.resize(2*(self.count + reqspace))
+            else:
+                raise ValueError(f'appending {dat.size} elements would overflow available buffer space: {self.maxfill}')
+        elif self.maxappend < reqspace:
+            self.normalize_buffer()
         oldct = self.count
-        self.count += dat.size
+        self.count += reqspace 
         self.seq[oldct:] = dat
 
 
-mpxautobufs = namedtuple('mpxautobufs', ['mp', 'mpi', 'ts', 'mu', 'invn', 'rbwd', 'rfwd', 'cbwd', 'cfwd'])
+mpxautobufs = namedtuple('mpxautobufs', ['mp', 'mpi', 'cov', 'ts', 'mu', 'invn', 'rbwd', 'rfwd', 'cbwd', 'cfwd'])
+
+
+def dif_eqs(ts, mu, w):
+    ssct = ts.shape[0] - w + 1
+    if ssct != mu.shape[0]:
+        raise ValueError
+    mu_s = np.empty(ssct)
+    mps.windowed_mean(ts, mu_s, w-1)
+    rbwd = ts[:ssct-1] - mu[:-1]
+    cbwd = ts[:ssct-1] - mu_s[1:]
+    rfwd = ts[w:] - mu[1:]
+    cfwd = ts[w:] - mu_s[1:]
+    return rbwd, cbwd, rfwd, cfwd
+
+
+def xcov(ts, mu, firstrow, minlag):
+    ssct = ts.shape[0] - w + 1
+    cov = np.empty(ssct - minlag, dtype='d')
+    mps.crosscov(cov, ts[minlag:], mu[minlag:], firstrow)
+    return cov
+
+
+def mpx(ts, w):
+    ssct = ts.shape[0] - w + 1
+    mu = np.empty(ssct, dtype='d')
+    mu_s = np.empty(ssct, dtype='d') # window length w - 1 skipping first and last
+    invn = np.empty(ssct, dtype='d')
+    minlag = w // 4
+
+    mps.windowed_mean(ts, mu, w)
+    mps.windowed_mean(ts[:-1], mu_s, w-1)
+    mps.windowed_invcnorm(ts, mu, invn, w)
+    rbwd = ts[:ssct-1] - mu[:-1]
+    cbwd = ts[:ssct-1] - mu_s[1:]
+    rfwd = ts[w:] - mu[1:]
+    cfwd = ts[w:] - mu_s[1:]
+
+    mp = np.full(ssct, -1, dtype='d')
+    mpi = np.full(ssct, -1, dtype='i')
+
+    first_row = ts[:w] - mu[0]
+    cov = np.empty(ssct - minlag, dtype='d')   
+ 
+    mps.crosscov(cov, ts[minlag:],  mu[minlag:], first_row)
+
+    # roffset only applies when this is tiled by row, since otherwise the index would be wrong
+    mps.mpx_inner(cov, rbwd, rfwd, cbwd, cfwd, invn, mp, mpi, minlag, 0) 
+
+    return mp, mpi
 
 
 class MPXstream:
@@ -123,12 +195,15 @@ class MPXstream:
         elif not (0 < minsep < maxsep):
             raise ValueError(f'negative minsep {minsep} is unsupported')
         # This object indexes by subsequence, not by time series element
+        self.sseqlen = sseqlen
         self.minsep = minsep
         self.maxsep = maxsep
         if minbufsz is None:
             minbufsz = (maxsep - minsep) + sseqlen - 1
         # this makes it easy to iterate over all buffers and apply something like a shift operation
         # I don't currently inherit from named tuple, because it adds restrictions and exposes too many operations.
+        # making this class a data class would make more sense here, but I don't think it has been
+        # backported to anything newer than 3.8. 
         self.buffers = mpxautobufs(mp=BufferedArray(minbufsz),
                                    mpi=BufferedArray(minbufsz, dtype='q'),
                                    ts=BufferedArray(minbufsz + sseqlen - 1),
@@ -144,12 +219,40 @@ class MPXstream:
         return self.buffers.mp.count
 
     @property
+    def cov(self):
+        return self.buffers.cov
+
+    @property
+    def ts(self):
+        return self.buffers.ts
+
+    @property
+    def mu(self):
+        return self.buffers.mu
+
+    @property
+    def rfwd(self):
+        return self.buffers.rfwd
+
+    @property
+    def rbwd(self):
+        return self.buffers.rbwd
+
+    @property
+    def cfwd(self):
+        return self.buffers.cfwd
+
+    @property
+    def cbwd(self):
+        return self.buffers.cbwd
+
+    @property
     def mp(self):
-        return self.buffers.mp.seq
+        return self.buffers.mp
 
     @property
     def mpi(self):
-        return self.buffers.mpi.seq
+        return self.buffers.mpi
 
     @property
     def size(self):
@@ -185,9 +288,30 @@ class MPXstream:
             for buf in self.buffers:
                 buf.resize(sz)
 
+
+    def seed(ts):
+        if self.mp.sseqct > 0:
+            raise ValueError('cannot seed non empty profile')
+        elif ts.size == 0:
+            raise ValueError('empty seed array')
+        self.ts.append(ts)
+        mps.moving_mean(ts, self.mu.seq, self.sseqlen)
+        xcov(self.ts, self.mu, firstrow, minlag)
+        rbwd, cbwd, rfwd, cfwd = dif_eqs(self.ts.seq, self.mu.seq, self.sseqlen)
+        self.rbwd.append(rbwd)
+        self.rfwd.append(rfwd)
+        self.cbwd.append(cbwd)
+        self.cfwd.append(cfwd)
+        # cov is just overwritten whenever we append
+        # whereas the others are still required later
+        cov = np.empty(ts.shape[0] - self.sseqlen - self.minlag + 1)
+        first_row = self.ts.seq[:self.sseqlen] - self.mu.seq[0]
+        mps.crosscov(cov, ts[minlag:],  mu[minlag:], first_row)
+        mps.mpx_inner(cov, rbwd, rfwd, cbwd, cfwd, invn, mp, mpi, minlag, 0) 
+
     def append(self, dat, allow_resize=False):
         if 0 < dat.size:
-            if dat.size <= self.maxappendable:
+            if dat.size <= self.maxappend:
                 if self.size - self.count < dat.size:
                     self.repack()
             elif allow_resize:
@@ -195,6 +319,34 @@ class MPXstream:
                 self.resize(2 * minreq)
             else:
                 raise ValueError
-            self.mp[sectbegin:] = -1
-            self.mpi[sectbegin:] = -1
+            # ignore maxsep for now
+            
+            # check starting subsequence count, as it serves as minlag here
+            oldssct = max(self.ts.count - self.sseqlen + 1, 0)
+            minlag = self.minlag if ssct < minlag else oldssct
+            sectbegin = max(0, self.ts.count - self.subseqlen + 1)
+            addct = (dat.shape[0] if self.ts.count >= self.subseqlen 
+                     else self.ts.count + dat.shape[0] - self.subseqlen + 1)
+            self.mp.fill(-1.0, dat.shape[0])
+            self.mpi.fill(-1, dat.shape[0])
+            self.ts.append(dat)
+            # update moving mean 
+            
+            # we use up to subsequence length - 1 existing entries
+            rbwd, cbwd, rfwd, cfwd = dif_eqs(self.ts.seq[sectbegin:], self.mu.seq[sectbegin:], self.sseqlen)
+            self.rbwd.append(rbwd)
+            self.rfwd.append(rfwd)
+            self.cbwd.append(cbwd)
+            self.cfwd.append(cfwd)
+            cov = np.empty(oldssct + addct - minlag)
+             
+            mps.windowed_mean(ts, mu_s, w-1)
+            # mps.crosscov(cov, ts[minlag:], 
+
+
+
+
+
+         
+
 
