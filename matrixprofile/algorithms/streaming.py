@@ -114,7 +114,10 @@ class BufferedArray:
         """
         if sz > self.maxfill:
             if allow_resize:
-                self.resize(2*(self.count + sz))
+                if 2*self.size >= self.count + sz:
+                    self.resize(2*self.size)
+                else: # kick this back if it could mess up size padding. 
+                    raise RuntimeError("Cannot implicitly resize by more than a factor of 2")
             else:
                 raise ValueError
         elif sz > self.maxappend:
@@ -141,11 +144,12 @@ mpxautobufs = namedtuple('mpxautobufs', ['mp', 'mpi', 'cov', 'ts', 'mu', 'invn',
 
 
 
-def xcov(ts, mu, firstrow, minsep):
+def xcov(ts, mu, firstrow, out=None):
     ssct = ts.shape[0] - w + 1
-    cov = np.empty(ssct - minsep, dtype='d')
-    mps.crosscov(cov, ts[minsep:], mu[minsep:], firstrow)
-    return cov
+    if ssct > 0 and out is None:
+        out = np.empty(ssct - minsep, dtype='d')
+    mps.crosscov(out, ts[minsep:], mu[minsep:], firstrow)
+    return out
 
 
 def mpx(ts, w):
@@ -187,7 +191,10 @@ class MPXstream:
     def __init__(self, sseqlen, minsep, maxsep=None, minbufsz =None):
         if sseqlen < 4:
             raise ValueError('subsequence lengths below 4 are not supported')
-        elif not (0 < minsep < maxsep):
+        elif maxsep is not None:
+            if not (0 < minsep < maxsep):
+                raise ValueError(f" minsep must be a positive value between 0 and maxsep if maxsep is provided, received minsep: {minsep}, maxsep: {maxsep}")
+        elif minsep < 0:
             raise ValueError(f'negative minsep {minsep} is unsupported')
         # This object indexes by subsequence, not by time series element
         self.sseqlen = sseqlen
@@ -221,7 +228,7 @@ class MPXstream:
         self.first_row = None 
 
     @property
-    def buffers:
+    def buffers(self):
         return mpxautobufs(self.mp, self.mpi, self.ts, self.mu, self.invn, self.rbwd, self.rfwd, self.cbwd, self.cfwd)
 
 
@@ -244,7 +251,7 @@ class MPXstream:
         for buf in self.buffers:
             buf.drop(ct)
 
-    def repack(self):
+    def normalize_buffers(self):
         """ normalize buffer layout so that retained data spans the positional range
             0 to size - 1
         """
@@ -255,7 +262,7 @@ class MPXstream:
     def resize(self, sz):
         """ resize underlying buffer """
         if self.count > sz:
-            raise ValueError
+            raise ValueError(f"a resized buffer of size {sz} is too small to retain {self.ts.count} saved elements")
         elif sz == self.size:
             self.normalize_buffer()
         else:
@@ -263,19 +270,21 @@ class MPXstream:
             for buf in self.buffers:
                 buf.resize(sz)
 
-    def seed(ts):
-        if self.mp.count > 0:
-            raise ValueError('cannot seed non empty profile')
-        elif ts.size == 0:
-            raise ValueError('empty seed array')
+    def append(ts):
         self.ts.append(ts)
         sz = ts.shape[0]
-        addct = max(ts.shape[0] - self.sseqlen + 1, 0) 
+        prevct = max(ts.count - self.sseqlen + 1, 0)
+        if prevct == 0:
+            addct = max(self.ts.count + ts.shape[0] - self.sseqlen + 1, 0)
+            ts_ = self.ts
+        else:
+            addct = self.ts.shape[0]
+            ts_ = self.ts[1-ts.shape[0]-self.sseqlen:]
         if addct != 0:
-            difct = max(addct-1, 0)
+            difct = addct if prevct != 0 else addct - 1
             mu_ = self.mu.fillable(addct)
-            mps.moving_mean(ts, mu_, self.sseqlen)
-            xcov(self.ts, mu_, self.firstrow, self.minsep)
+            mps.moving_mean(ts_, mu_, self.sseqlen)
+            xcov(ts_, mu_, self.firstrow, out=self.cov.data)
             if difct != 0:
                 rbwd_ = self.rbwd.fillable(difct)
                 rfwd_ = self.rfwd.fillable(difct)
@@ -283,53 +292,17 @@ class MPXstream:
                 cfwd_ = self.cfwd.fillable(difct)
                 mu_s = np.empty(difct)
                 mps.windowed_mean(ts[:1], mu_s, w-1)
-                rbwd_[:] = ts[:addct-1] - mu_[:-1]
-                rfwd_[:] = ts[self.sseqlen:] - mu_[1:]
-                cbwd_[:] = ts[:addct-1] - mu_s
-                cfwd_[:] = ts[self.sseqlen:] - mu_s
-            cov_ = self.cov.fillable(addct - self.minsep) 
-            self.first_row = self.ts.data[:self.sseqlen] - self.mu.data[0]
-            mps.crosscov(cov, ts[minsep:],  mu[minsep:], first_row)
-            mps.mpx_inner(cov, rbwd, rfwd, cbwd, cfwd, invn, mp, mpi, minsep, 0) 
-
-    def append(self, dat, allow_resize=False):
-        if 0 < dat.size:
-            if dat.size <= self.maxappend:
-                if self.size - self.count < dat.size:
-                    self.repack()
-            elif allow_resize:
-                minreq = self.count + dat.size
-                self.resize(2 * minreq)
-            else:
-                raise ValueError
-            # ignore maxsep for now
-            
-            # check starting subsequence count, as it serves as minsep here
-            oldssct = max(self.ts.count - self.sseqlen + 1, 0)
-            minsep = self.minsep if ssct < minsep else oldssct
-            addct = (dat.shape[0] if self.ts.count >= self.subseqlen - 1 
-                     else self.ts.count + dat.shape[0] - self.subseqlen + 1)
-           self.ts.append(dat)
-            # update moving mean 
-            if addct > 0:
+                np.subtract(ts[:difct], mu_[:-1], out=rbwd_)
+                np.subtract(ts[self.sseqlen:], mu_[1:], out=rfwd_)
+                np.subtract(ts[:difct], mu_s, out=cbwd_)
+                np.subtract(ts[self.sseqlen:], mu_s, out=cfwd_)
                 self.mp.fill(-1.0, addct)
                 self.mpi.fill(-1, addct)
-                mu_ = self.mu.fillable(addct)
-                bwd = ts[:ssct-1] - mu[:-1
-            # we use up to subsequence length - 1 existing entries
-            self.rbwd.append(rbwd)
-            self.rfwd.append(rfwd)
-            self.cbwd.append(cbwd)
-            self.cfwd.append(cfwd)
-            cov = np.empty(oldssct + addct - minsep)
-             
-            mps.windowed_mean(ts, mu_s, w-1)
-            # mps.crosscov(cov, ts[minsep:], 
-
-
-
-
-
-         
-
+            if addct > self.minsep:
+                self.cov.reset()
+                cov_ = self.cov.fillable(addct - self.minsep)
+                np.subtract(self.ts.data[:self.sseqlen], self.mu.data[0], out=self.first_row)
+                mps.crosscov(cov, self.ts[minsep:],  self.mu[minsep:], first_row)
+                mps.mpx_inner(cov_, self.rbwd, self.rfwd, self.cbwd, self.cfwd, invn, mp, mpi, minsep, self.mp.minindex) 
+            
 
