@@ -8,13 +8,13 @@ class BufferedArray:
     def __init__(self, size, dtype='d', minindex=0):
         self.size = size
         self.minindex = minindex
-        self._seq = np.empty(size, dtype=dtype)
+        self._data = np.empty(size, dtype=dtype)
         self.count = 0
         self.beginpos = 0
 
     @property
-    def seq(self):
-        return self._seq[self.beginpos:self.beginpos + self.count]
+    def data(self):
+        return self._data[self.beginpos:self.beginpos + self.count]
 
     @property
     def maxindex(self):
@@ -24,30 +24,30 @@ class BufferedArray:
     @property
     def maxfill(self):
         """ number of unused entries"""
-        return self._seq.shape[0] - self.count
+        return self._data.shape[0] - self.count
 
     @property
     def maxappend(self):
         """ number of unused entries located at the end of the buffer """
-        return self._seq.shape[0] - self.count - self.beginpos
+        return self._data.shape[0] - self.count - self.beginpos
 
     # dunder methods are added for debugging convenience.
     # Be warned, these create views on every call
 
     def __iter__(self):
-        return iter(self.seq)
+        return iter(self.data)
 
     def __len__(self):
         """ number of in memory elements
             note: len is supposed to match the number of elements returned by iter
         """
-        return self.seq.shape[0]
+        return self.data.shape[0]
 
     def __getitem__(self, item):
-        return self.seq[item]
+        return self.data[item]
 
     def __setitem__(self, key, value):
-        self.seq[key] = value
+        self.data[key] = value
 
     def normalize_buffer(self):
         """ normalize buffer layout so that retained data spans the positional range
@@ -56,7 +56,7 @@ class BufferedArray:
             It is intentionally left as an explicit op.
         """
         if self.count > 0 and self.beginpos != 0:
-            self._seq[:self.count] = self.seq
+            self._data[:self.count] = self.data
             self.beginpos = 0
 
     def fill(self, x, count):
@@ -65,7 +65,7 @@ class BufferedArray:
         elif count > self.maxappend:
             self.normalize_buffer()
         self.count += count
-        self.seq[-count:] = x
+        self.data[-count:] = x
 
     def shiftby(self, count, normalize=False, fillval=None):
         """ discard ct elements from memory starting from the current beginning of the in memory
@@ -80,9 +80,11 @@ class BufferedArray:
             else:
                 self.count = count - self.count
                 self.beginpos = 0
-                self.seq[:] = fillval
+                self.data[:] = fillval
+                self.minindex += self.count
         elif count == self.count:
             self.beginpos = 0
+            self.minindex += self.count
             self.count = 0
         else:
             self.beginpos += count
@@ -100,11 +102,16 @@ class BufferedArray:
         """ resize underlying buffer, raise an error if it would truncate live data """
         if sz < self.count:
             raise ValueError(f'buffer size {sz} is too small to accommodate {self.count} live elements')
-        dat = self.seq
-        self._seq = np.empty(sz, dtype=self._seq.dtype)
-        self.seq[:] = dat
+        dat = self.data
+        self._data = np.empty(sz, dtype=self._data.dtype)
+        self.data[:] = dat
 
     def fillable(self, sz, allow_resize=True):
+        """ increment the number of live elements by sz without initialization and return a view
+            to those elements. If allow_resize is True, then the underlying buffer will be resized
+            if necessary. If the buffer does not have sufficient space at the end of the array, it will
+            shift all live data to the beginning of the array.
+        """
         if sz > self.maxfill:
             if allow_resize:
                 self.resize(2*(self.count + sz))
@@ -113,7 +120,7 @@ class BufferedArray:
         elif sz > self.maxappend:
             self.normalize_buffer()
         self.count += sz
-        return self.seq[-sz:]         
+        return self.data[-sz:]         
 
     def append(self, dat, allow_resize=True):
         """ append to buffer """
@@ -127,29 +134,17 @@ class BufferedArray:
             self.normalize_buffer()
         oldct = self.count
         self.count += reqspace 
-        self.seq[oldct:] = dat
+        self.data[oldct:] = dat
 
 
 mpxautobufs = namedtuple('mpxautobufs', ['mp', 'mpi', 'cov', 'ts', 'mu', 'invn', 'rbwd', 'rfwd', 'cbwd', 'cfwd'])
 
 
-def dif_eqs(ts, mu, w):
-    ssct = ts.shape[0] - w + 1
-    if ssct != mu.shape[0]:
-        raise ValueError
-    mu_s = np.empty(ssct)
-    mps.windowed_mean(ts, mu_s, w-1)
-    rbwd = ts[:ssct-1] - mu[:-1]
-    cbwd = ts[:ssct-1] - mu_s[1:]
-    rfwd = ts[w:] - mu[1:]
-    cfwd = ts[w:] - mu_s[1:]
-    return rbwd, cbwd, rfwd, cfwd
 
-
-def xcov(ts, mu, firstrow, minlag):
+def xcov(ts, mu, firstrow, minsep):
     ssct = ts.shape[0] - w + 1
-    cov = np.empty(ssct - minlag, dtype='d')
-    mps.crosscov(cov, ts[minlag:], mu[minlag:], firstrow)
+    cov = np.empty(ssct - minsep, dtype='d')
+    mps.crosscov(cov, ts[minsep:], mu[minsep:], firstrow)
     return cov
 
 
@@ -158,7 +153,7 @@ def mpx(ts, w):
     mu = np.empty(ssct, dtype='d')
     mu_s = np.empty(ssct, dtype='d') # window length w - 1 skipping first and last
     invn = np.empty(ssct, dtype='d')
-    minlag = w // 4
+    minsep = w // 4
 
     mps.windowed_mean(ts, mu, w)
     mps.windowed_mean(ts[:-1], mu_s, w-1)
@@ -172,12 +167,12 @@ def mpx(ts, w):
     mpi = np.full(ssct, -1, dtype='i')
 
     first_row = ts[:w] - mu[0]
-    cov = np.empty(ssct - minlag, dtype='d')   
+    cov = np.empty(ssct - minsep, dtype='d')   
  
-    mps.crosscov(cov, ts[minlag:],  mu[minlag:], first_row)
+    mps.crosscov(cov, ts[minsep:],  mu[minsep:], first_row)
 
     # roffset only applies when this is tiled by row, since otherwise the index would be wrong
-    mps.mpx_inner(cov, rbwd, rfwd, cbwd, cfwd, invn, mp, mpi, minlag, 0) 
+    mps.mpx_inner(cov, rbwd, rfwd, cbwd, cfwd, invn, mp, mpi, minsep, 0) 
 
     return mp, mpi
 
@@ -189,7 +184,7 @@ class MPXstream:
         may refactor later to share things between profile types
     """
 
-    def __init__(self, sseqlen, minsep, maxsep, minbufsz =None):
+    def __init__(self, sseqlen, minsep, maxsep=None, minbufsz =None):
         if sseqlen < 4:
             raise ValueError('subsequence lengths below 4 are not supported')
         elif not (0 < minsep < maxsep):
@@ -199,65 +194,45 @@ class MPXstream:
         self.minsep = minsep
         self.maxsep = maxsep
         if minbufsz is None:
-            minbufsz = (maxsep - minsep) + sseqlen - 1
-        # this makes it easy to iterate over all buffers and apply something like a shift operation
-        # I don't currently inherit from named tuple, because it adds restrictions and exposes too many operations.
-        # making this class a data class would make more sense here, but I don't think it has been
-        # backported to anything newer than 3.8. 
-        self.buffers = mpxautobufs(mp=BufferedArray(minbufsz),
-                                   mpi=BufferedArray(minbufsz, dtype='q'),
-                                   ts=BufferedArray(minbufsz + sseqlen - 1),
-                                   mu=BufferedArray(minbufsz),
-                                   invn=BufferedArray(minbufsz),
-                                   rbwd=BufferedArray(minbufsz),
-                                   rfwd=BufferedArray(minbufsz),
-                                   cbwd=BufferedArray(minbufsz),
-                                   cfwd=BufferedArray(minbufsz))
+            if maxsep is None:
+                minbufsz = max(2 * sseqlen, 4096)
+            else:
+                minbufsz = (maxsep - minsep) + sseqlen - 1
+        
+        # These are actually different sizes, but it's much easier to allocate them uniformly
+        # This way if they are very large, they can be aligned to a multiple of page size
+        #
+        # This works fine, since they each explicitly track the number of live elements at a given time      
+ 
+        self.mp=BufferedArray(minbufsz)
+        self.mpi=BufferedArray(minbufsz, dtype='q')
+        self.ts=BufferedArray(minbufsz)
+        self.mu=BufferedArray(minbufsz)
+        self.invn=BufferedArray(minbufsz)
+        self.rbwd=BufferedArray(minbufsz)
+        self.rfwd=BufferedArray(minbufsz)
+        self.cbwd=BufferedArray(minbufsz)
+        self.cfwd=BufferedArray(minbufsz)
+        self.cov=BufferedArray(minbufsz)
+ 
+        # cov and first_row are treated as scratch space that is only ever 
+        # read or overwritten,
+        # so we don't include them in the object's buffers
+        self.first_row = None 
+
+    @property
+    def buffers:
+        return mpxautobufs(self.mp, self.mpi, self.ts, self.mu, self.invn, self.rbwd, self.rfwd, self.cbwd, self.cfwd)
+
 
     @property
     def count(self):
-        return self.buffers.mp.count
+        return self.mp.count
 
     @property
-    def cov(self):
-        return self.buffers.cov
-
-    @property
-    def ts(self):
-        return self.buffers.ts
-
-    @property
-    def mu(self):
-        return self.buffers.mu
-
-    @property
-    def rfwd(self):
-        return self.buffers.rfwd
-
-    @property
-    def rbwd(self):
-        return self.buffers.rbwd
-
-    @property
-    def cfwd(self):
-        return self.buffers.cfwd
-
-    @property
-    def cbwd(self):
-        return self.buffers.cbwd
-
-    @property
-    def mp(self):
-        return self.buffers.mp
-
-    @property
-    def mpi(self):
-        return self.buffers.mpi
-
-    @property
-    def size(self):
+    def buffer_size(self):
         """ buffer size """
-        return self.buffers.mp.size
+        return self.mp.size
 
     def drop(self, ct):
         """ discard ct elements from memory starting from the current beginning of the in memory
@@ -288,26 +263,34 @@ class MPXstream:
             for buf in self.buffers:
                 buf.resize(sz)
 
-
     def seed(ts):
-        if self.mp.sseqct > 0:
+        if self.mp.count > 0:
             raise ValueError('cannot seed non empty profile')
         elif ts.size == 0:
             raise ValueError('empty seed array')
         self.ts.append(ts)
-        mps.moving_mean(ts, self.mu.seq, self.sseqlen)
-        xcov(self.ts, self.mu, firstrow, minlag)
-        rbwd, cbwd, rfwd, cfwd = dif_eqs(self.ts.seq, self.mu.seq, self.sseqlen)
-        self.rbwd.append(rbwd)
-        self.rfwd.append(rfwd)
-        self.cbwd.append(cbwd)
-        self.cfwd.append(cfwd)
-        # cov is just overwritten whenever we append
-        # whereas the others are still required later
-        cov = np.empty(ts.shape[0] - self.sseqlen - self.minlag + 1)
-        first_row = self.ts.seq[:self.sseqlen] - self.mu.seq[0]
-        mps.crosscov(cov, ts[minlag:],  mu[minlag:], first_row)
-        mps.mpx_inner(cov, rbwd, rfwd, cbwd, cfwd, invn, mp, mpi, minlag, 0) 
+        sz = ts.shape[0]
+        addct = max(ts.shape[0] - self.sseqlen + 1, 0) 
+        if addct != 0:
+            difct = max(addct-1, 0)
+            mu_ = self.mu.fillable(addct)
+            mps.moving_mean(ts, mu_, self.sseqlen)
+            xcov(self.ts, mu_, self.firstrow, self.minsep)
+            if difct != 0:
+                rbwd_ = self.rbwd.fillable(difct)
+                rfwd_ = self.rfwd.fillable(difct)
+                cbwd_ = self.cbwd.fillable(difct)
+                cfwd_ = self.cfwd.fillable(difct)
+                mu_s = np.empty(difct)
+                mps.windowed_mean(ts[:1], mu_s, w-1)
+                rbwd_[:] = ts[:addct-1] - mu_[:-1]
+                rfwd_[:] = ts[self.sseqlen:] - mu_[1:]
+                cbwd_[:] = ts[:addct-1] - mu_s
+                cfwd_[:] = ts[self.sseqlen:] - mu_s
+            cov_ = self.cov.fillable(addct - self.minsep) 
+            self.first_row = self.ts.data[:self.sseqlen] - self.mu.data[0]
+            mps.crosscov(cov, ts[minsep:],  mu[minsep:], first_row)
+            mps.mpx_inner(cov, rbwd, rfwd, cbwd, cfwd, invn, mp, mpi, minsep, 0) 
 
     def append(self, dat, allow_resize=False):
         if 0 < dat.size:
@@ -321,27 +304,27 @@ class MPXstream:
                 raise ValueError
             # ignore maxsep for now
             
-            # check starting subsequence count, as it serves as minlag here
+            # check starting subsequence count, as it serves as minsep here
             oldssct = max(self.ts.count - self.sseqlen + 1, 0)
-            minlag = self.minlag if ssct < minlag else oldssct
-            sectbegin = max(0, self.ts.count - self.subseqlen + 1)
-            addct = (dat.shape[0] if self.ts.count >= self.subseqlen 
+            minsep = self.minsep if ssct < minsep else oldssct
+            addct = (dat.shape[0] if self.ts.count >= self.subseqlen - 1 
                      else self.ts.count + dat.shape[0] - self.subseqlen + 1)
-            self.mp.fill(-1.0, dat.shape[0])
-            self.mpi.fill(-1, dat.shape[0])
-            self.ts.append(dat)
+           self.ts.append(dat)
             # update moving mean 
-            
+            if addct > 0:
+                self.mp.fill(-1.0, addct)
+                self.mpi.fill(-1, addct)
+                mu_ = self.mu.fillable(addct)
+                bwd = ts[:ssct-1] - mu[:-1
             # we use up to subsequence length - 1 existing entries
-            rbwd, cbwd, rfwd, cfwd = dif_eqs(self.ts.seq[sectbegin:], self.mu.seq[sectbegin:], self.sseqlen)
             self.rbwd.append(rbwd)
             self.rfwd.append(rfwd)
             self.cbwd.append(cbwd)
             self.cfwd.append(cfwd)
-            cov = np.empty(oldssct + addct - minlag)
+            cov = np.empty(oldssct + addct - minsep)
              
             mps.windowed_mean(ts, mu_s, w-1)
-            # mps.crosscov(cov, ts[minlag:], 
+            # mps.crosscov(cov, ts[minsep:], 
 
 
 
