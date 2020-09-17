@@ -70,7 +70,7 @@ class BufferedArray:
 
     @property
     def maxfill(self):
-        """ number of unused entries"""
+        """ number of presently unused entries"""
         return self._data.shape[0] - self.count
 
     @property
@@ -102,11 +102,11 @@ class BufferedArray:
             Since this is an inplace op, it can invalidate python iterators to this object.
             It is intentionally left as an explicit op.
         """
-        if self.count > 0 and self.beginpos != 0:
+        if self.beginpos != 0:
             self._data[:self.count] = self.data
-        self.beginpos = 0
+            self.beginpos = 0
 
-    def extend(self, fillval, count):
+    def append(self, fillval, count):
         """
         """
         if not (0 < count < self.maxfill):
@@ -116,14 +116,24 @@ class BufferedArray:
         self.count += count
         self.data[-count:] = fillval
 
-    def shiftby(self, count, normalize=False):
+    def shiftby(self, count):
         """ discard ct elements from memory starting from the current beginning of the in memory
             portion
         """
-        if count > self.count:
-            raise ValueError("cannot shift by more than the total number of live elements in the array")
-        self.beginpos += count
-        self.count -= count
+        if count < 0:
+            raise ValueError("shift count cannot be negative")
+        elif count > self.count:
+            # This can arise when aggregating multiple sequences of non-uniform length.
+            # One sequence may depend on > 1 elements of another sequence, so a shift by some amount
+            # greater than what is contained here right now indicates no data was provided. For that reason
+            # we apply the entire shift to minindex, implicitly normalize the buffer, and set the number of live
+            # elements to 0 (so array.data returns an empty view)
+
+            self.beginpos = 0
+            self.count = 0
+        else:
+            self.beginpos += count
+            self.count -= count
         self.minindex += count
 
     def resize(self, sz):
@@ -147,14 +157,14 @@ class BufferedArray:
         self.count += sz
         return self.data[-sz:]
 
-    def append(self, dat, allow_resize=True):
-        """ append to buffer """
+    def extend(self, dat):
+        """ append to buffer. In most python interfaces, extend is used with iterables. This naming convention
+            maintains consistency with that, without checking explicit inheritance from Iterable, which numpy may
+            not adhere to strictly.
+        """
         reqspace = dat.size
         if self.maxfill < reqspace:
-            if allow_resize:
-                self.resize(2 * (self.count + reqspace))
-            else:
-                raise ValueError(f"appending {dat.size} elements would overflow available buffer space: {self.maxfill}")
+            raise ValueError(f"appending {dat.size} elements would overflow available buffer space: {self.maxfill}")
         elif self.maxappend < reqspace:
             self.normalize_buffer()
         oldct = self.count
@@ -298,25 +308,51 @@ class MPXstream:
         prevct = self.sseqct
         self.ts.append(ts)
         updct = max(self.ts.count - self.sseqlen + 1, 0)
+        if updct == prevct:
+            return
+        if updct > self.ts.size:
+            self.resize(2*updct)
         addct = updct - prevct
-        if addct != 0:
-            if updct > self.ts.size:
-                self.resize(2*updct)
-            difct = addct if prevct != 0 else addct - 1
-            ts_ = self.ts[updct:]
-            mu_ = self.mu.fillable(addct)
-            mps.moving_mean(ts_, mu_, self.sseqlen)
-            rbwd_ = self.rbwd.fillable(difct)
-            rfwd_ = self.rfwd.fillable(difct)
-            cbwd_ = self.cbwd.fillable(difct)
-            cfwd_ = self.cfwd.fillable(difct)
-            mu_s = np.empty(difct)
-            mps.windowed_mean(ts[:1], mu_s, w - 1)
-            np.subtract(ts_[:difct], mu_[:-1], out=rbwd_)
-            np.subtract(ts_[self.sseqlen:], mu_[1:], out=rfwd_)
-            np.subtract(ts_[:difct], mu_s, out=cbwd_)
-            np.subtract(ts_[self.sseqlen:], mu_s, out=cfwd_)
-            xcov(ts_, mu_, self.firstrow, out=cov_)
-            self.mp.extend(fillval=-1.0, count=addct)
-            self.mpi.extend(fillval=-1, count=addct)
-            mps.mpx_inner(cov_, self.rbwd, self.rfwd, self.cbwd, self.cfwd, invn, mp, mpi, minsep, self.mp.minindex)
+        difct = addct if prevct != 0 else addct - 1
+        ts_ = self.ts[prevct:]
+        mu_ = self.mu.fillable(addct)
+        mps.moving_mean(ts_, mu_, self.sseqlen)
+
+        mu_s = np.empty(difct)
+        mps.windowed_mean(ts_[:1], mu_s, w - 1)
+
+        # This can be done using fillable as well, which might make fewer copies.
+        # It's just less readable. I would probably prefer to move the fill function for these
+        # back to cython if we need to go that rather than use something weird here.
+
+        self.rbwd.append(ts_[:difct] - mu_[-1])
+        self.rfwd.append(ts_[self.sseqlen:] - mu_[1:])
+        self.cbwd.append(ts_[:difct])
+        self.cfwd.append(ts_[self.sseqlen:] - mu_s)
+
+        # extend these even if no comparisons are possible right now to maintain a consistent state
+        self.mp.extend(initval=-1.0, count=addct)
+        self.mpi.extend(initval=-1, count=addct)
+
+        if updct <= self.minsep:
+            return
+        elif prevct < self.minsep:
+            trim = self.minsep - prevct
+            ts_ = ts_[trim:]
+            mu_ = mu_[trim:]
+
+        cov_ = np.empty(mu_.shape[0], dtype='d')
+        xcov(ts_, mu_, self.firstrow, out=cov_)
+
+        minsep_ = max(prevct, self.minsep)
+
+        mps.mpx_inner(cov_,
+                      self.rbwd,
+                      self.rfwd,
+                      self.cbwd,
+                      self.cfwd,
+                      self.invn,
+                      self.mp,
+                      self.mpi,
+                      minsep_,
+                      self.mp.minindex)
