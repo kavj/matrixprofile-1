@@ -1,80 +1,110 @@
+from abc import abstractmethod, ABC
 import numpy as np
 
 
-class BufferedArray:
-    """ An extremely basic buffered array, made with streaming data in mind
+class StreamArrayBase(ABC):
+    """ A base class containing the intended interface for an array class specialized
+        for streaming data.
 
-        Since this is written primarily with streaming data in mind, resizing requires an explicit operation.
-        This ensures aggregated groups of arrays that are supposed to maintain similar length remain that way.
+        The specialization of a streaming array is an attempt to provide a queue like interface which is compatible
+        with a pointer like iterator.
 
-        Arrays are maintained as contiguous 1D sections in memory. Appended elements are added to the end of this and
-        do not affect the starting position of the array in memory unless an insufficient number of elements are
-        available at the end. These cases are handled by normalizing the buffer, performed by copying the array back
-        to the first position of the buffer.
-
-        Since normalization clobbers any existing iterators and data references, there is a property meant to expose
-        whether it's necessary. maxappend indicates the number of entries available at the end of the buffer, whereas
-        maxfill indicates the total number of unused entries. If the buffer is normalized, these are the same.
-
-        Shift operations adjust the minimum index and the starting position of the array in memory.
-        shift operations adjust the starting position of the array in memory over the same underlying buffer,
-        up to the length of the array.
-
-        Shifts are done implicitly, by changing the starting position of the array, the number of live elements it
-        currently contains, and the minimum index, which specifies the index of the first element of the array with
-        respect to the underlying stream, which may be of arbitrary length.
-
-        Slicing or calling .array provides a view of the underlying array implementation without extra machinery.
-        This approach is used, because slice notation is virtually never used on buffers, and this avoids forcing
-        people to use an extra round of indirection just to get the appropriate view.
-
-        Typing somebufferedarray.array[...] instead of somebufferedarray[...] gets old fast.
-
-        iter and len dundermethods are usually provided together. These can be removed if necessary, but they are here
-        in part to accompany slicing behavior. This way
-
-        for elt in somearray[start:end:step]:
-            ....
-
-        and
-
-        for elt in somearray:
-            ....
-
-        both work as expected in that they generate a view on the presently used portion of the array
-        Avoiding possible invalidation or clobbering of iterators and slices should be done by making a copy.
-        That can be added here via optional argument or added inline.
-
-        Right now the underlying array implementation uses numpy. This can be changed. My biggest concern is how
-        well the interface works.
+        This makes it easy enough to reuse allocated space when trivially copyable data is added to the end of or
+        removed from the beginning of the array without reallocating the entire buffer at each step. It also alleviates
+        the issue of explicitly computing the slice corresponding to a subrange in user code in conjunction with
+        a secondary slice operation.
 
     """
 
-    def __init__(self, size, dtype='d', minindex=0):
+    @property
+    @abstractmethod
+    def array(self):
+        """ return a C contiguous view to the currently used section of the underlying array or buffer """
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def unused_count(self):
+        """ number of presently unused entries"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def __iter__(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def __len__(self):
+        raise NotImplementedError
+
+    # This is intended to propagate slicing so that we can write streamed[...]
+    # rather than streamed.array[...], which brings it close to the verbosity of
+    # inline slicing of subranges
+    @abstractmethod
+    def __getitem__(self, item):
+        raise NotImplementedError
+
+    @abstractmethod
+    def __setitem__(self, key, value):
+        raise NotImplementedError
+
+    @abstractmethod
+    def extend(self, count, fill_value=None):
+        """ Extend array boundary and optionally initialize with fill_value
+            This is inconsistent with Python's internal use of the word "extend", which
+            explicitly takes an iterable, but it's still clearer than other options.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def drop_leading(self, count):
+        """ discard count elements from the beginning of the array
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def resize_buffer(self, size):
+        """ resize the underlying buffer or array. This may raise an error if the updated size is too small to
+            accommodate the currently used or "live" portion of the current buffer.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def append(self, data):
+        """ extend the current array, and copy data to the extended portion. I'm using the term "extend" because
+
+        """
+        raise NotImplementedError
+
+
+class StreamArray(StreamArrayBase):
+    """
+    """
+
+    def __init__(self, size, dtype='d', min_index=0):
         self.size = size
-        self.minindex = minindex
+        self.min_index = min_index
         self._array = np.empty(size, dtype=dtype)
         self.count = 0
-        self.beginpos = 0
+        self.begin_pos = 0
 
     @property
     def array(self):
-        return self._array[self.beginpos:self.beginpos + self.count]
+        return self._array[self.begin_pos:self.begin_pos + self.count]
 
     @property
-    def maxindex(self):
+    def max_index(self):
         """ the absolute time based index of the last buffer element in memory"""
-        return self.minindex + self.count - 1 if self.count != 0 else None
+        return self.min_index + self.count - 1 if self.count != 0 else None
 
     @property
-    def maxfill(self):
+    def unused_count(self):
         """ number of presently unused entries"""
         return self._array.shape[0] - self.count
 
     @property
-    def maxappend(self):
+    def max_appendable(self):
         """ number of unused entries located at the end of the buffer """
-        return self._array.shape[0] - self.count - self.beginpos
+        return self._array.shape[0] - self.count - self.begin_pos
 
     # dunder methods are added for debugging convenience.
     # Be warned, these create views on every call
@@ -94,27 +124,19 @@ class BufferedArray:
     def __setitem__(self, key, value):
         self.array[key] = value
 
-    def normalize_buffer(self):
-        """ normalize buffer layout so that retained data spans the positional range
-            0 to size - 1.
-            Since this is an inplace op, it can invalidate python iterators to this object.
-            It is intentionally left as an explicit op.
+    def extend(self, count, fill_value=None):
         """
-        if self.beginpos != 0:
-            self._array[:self.count] = self.array
-            self.beginpos = 0
-
-    def append(self, fillval, count):
-        """
+        try to extend the current array by count positions, assign fill_value to these if one is provided.
         """
         if not (0 < count < self.maxfill):
             raise ValueError(f"fill count must be between 0 and current buffer size {self.maxfill}, {count} received")
         elif count > self.maxappend:
             self.normalize_buffer()
         self.count += count
-        self.array[-count:] = fillval
+        if fill_value is not None:
+            self.array[-count:].fill(fill_value)
 
-    def shiftby(self, count):
+    def drop_leading(self, count):
         """ discard ct elements from memory starting from the current beginning of the in memory
             portion
         """
@@ -124,38 +146,25 @@ class BufferedArray:
             # This can arise when aggregating multiple sequences of non-uniform length.
             # One sequence may depend on > 1 elements of another sequence, so a shift by some amount
             # greater than what is contained here right now indicates no data was provided. For that reason
-            # we apply the entire shift to minindex, implicitly normalize the buffer, and set the number of live
+            # we apply the entire shift to min_index, implicitly normalize the buffer, and set the number of live
             # elements to 0 (so array.data returns an empty view)
 
-            self.beginpos = 0
+            self.begin_pos = 0
             self.count = 0
         else:
-            self.beginpos += count
+            self.begin_pos += count
             self.count -= count
-        self.minindex += count
+        self.min_index += count
 
-    def resize(self, sz):
+    def resize_buffer(self, size):
         """ resize underlying buffer, raise an error if it would truncate live data """
-        if sz < self.count:
-            raise ValueError(f"buffer size {sz} is too small to accommodate {self.count} live elements")
-        dat = self.array
-        self._array = np.empty(sz, dtype=self._data.dtype)
-        self.array[:] = dat
+        if size < self.count:
+            raise ValueError(f"buffer size {size} is too small to accommodate {self.count} live elements")
+        data = self.array
+        self._array = np.empty(size, dtype=self._array.dtype)
+        self.array[:] = data
 
-    def fillable(self, sz):
-        """ increment the number of live elements by sz without initialization and return a view
-            to those elements. If allow_resize is True, then the underlying buffer will be resized
-            if necessary. If the buffer does not have sufficient space at the end of the array, it will
-            shift all live data to the beginning of the array.
-        """
-        if sz > self.maxfill:
-            raise ValueError("fillable size requested exceeds the number of free elements in the current buffer")
-        elif sz > self.maxappend:
-            self.normalize_buffer()
-        self.count += sz
-        return self.data[-sz:]
-
-    def extend(self, dat):
+    def append(self, data):
         """ append to buffer. In most python interfaces, extend is used with iterables. This naming convention
             maintains consistency with that, without checking explicit inheritance from Iterable, which numpy may
             not adhere to strictly.
@@ -169,35 +178,45 @@ class BufferedArray:
         self.count += reqspace
         self.array[prevct:] = dat
 
+    def normalize_buffer(self):
+        """ normalize buffer layout so that retained data spans the positional range
+            0 to size - 1.
+            Since this is an inplace op, it can invalidate python iterators to this object.
+            It is intentionally left as an explicit op.
+        """
+        if self.begin_pos != 0:
+            self._array[:self.count] = self.array
+            self.begin_pos = 0
 
-def xcov(ts, mu, firstrow, out=None):
-    ssct = ts.shape[0] - w + 1
-    if ssct > 0 and out is None:
-        out = np.empty(ssct - minsep, dtype='d')
-    mps.crosscov(out, ts[minsep:], mu[minsep:], firstrow)
+
+def xcov(ts, mu, cmpto, out=None):
+    sseqct = ts.shape[0] - cmpto.shape[0] + 1
+    if sseqct > 0 and out is None:
+        out = np.empty(sseqct - minsep, dtype='d')
+    mps.crosscov(out, ts[minsep:], mu[minsep:], cmpto)
     return out
 
 
 def mpx(ts, w):
-    ssct = ts.shape[0] - w + 1
-    mu = np.empty(ssct, dtype='d')
-    mu_s = np.empty(ssct, dtype='d')  # window length w - 1 skipping first and last
-    invn = np.empty(ssct, dtype='d')
+    sseqct = ts.shape[0] - w + 1
+    mu = np.empty(sseqct, dtype='d')
+    mu_s = np.empty(sseqct, dtype='d')  # window length w - 1 skipping first and last
+    invn = np.empty(sseqct, dtype='d')
     minsep = w // 4
 
     mps.windowed_mean(ts, mu, w)
     mps.windowed_mean(ts[:-1], mu_s, w - 1)
     mps.windowed_invcnorm(ts, mu, invn, w)
-    rbwd = ts[:ssct - 1] - mu[:-1]
-    cbwd = ts[:ssct - 1] - mu_s[1:]
+    rbwd = ts[:sseqct - 1] - mu[:-1]
+    cbwd = ts[:sseqct - 1] - mu_s[1:]
     rfwd = ts[w:] - mu[1:]
     cfwd = ts[w:] - mu_s[1:]
 
-    mp = np.full(ssct, -1, dtype='d')
-    mpi = np.full(ssct, -1, dtype='i')
+    mp = np.full(sseqct, -1, dtype='d')
+    mpi = np.full(sseqct, -1, dtype='i')
 
     first_row = ts[:w] - mu[0]
-    cov = np.empty(ssct - minsep, dtype='d')
+    cov = np.empty(sseqct - minsep, dtype='d')
 
     mps.crosscov(cov, ts[minsep:], mu[minsep:], first_row)
 
@@ -218,8 +237,8 @@ class MPXstream:
             raise ValueError("subsequence lengths less than 2 do not admit a normalized representation")
         elif maxsep is not None:
             if not (0 < minsep < maxsep):
-                raise ValueError(
-                    f" minsep must be a positive value between 0 and maxsep if maxsep is provided, received minsep: {minsep}, maxsep: {maxsep}")
+                raise ValueError(f"minsep must be a positive value between 0 and maxsep if maxsep is provided, "
+                                 f"received minsep: {minsep}, maxsep: {maxsep}")
         elif minsep <= 0:
             raise ValueError("zero or negative minsep is not well defined")
         # This object indexes by subsequence, not by time series element
@@ -239,52 +258,22 @@ class MPXstream:
 
         # I'm using a leading underscore, which indicates that something should be private, to refer
         # to the buffer data structure here and no underscore to refer to the live section of the array
-        self._mp = BufferedArray(minbufsz)
-        self._mpi = BufferedArray(minbufsz, dtype='q')
-        self._ts = BufferedArray(minbufsz)
-        self._mu = BufferedArray(minbufsz)
-        self._invn = BufferedArray(minbufsz)
-        self._rbwd = BufferedArray(minbufsz)
-        self._rfwd = BufferedArray(minbufsz)
-        self._cbwd = BufferedArray(minbufsz)
-        self._cfwd = BufferedArray(minbufsz)
+        self.mp = StreamArray(minbufsz)
+        self.mpi = StreamArray(minbufsz, dtype='q')
+        self.ts = StreamArray(minbufsz)
+        self.mu = StreamArray(minbufsz)
+        self.invn = StreamArray(minbufsz)
+        self.rbwd = StreamArray(minbufsz)
+        self.rfwd = StreamArray(minbufsz)
+        self.cbwd = StreamArray(minbufsz)
+        self.cfwd = StreamArray(minbufsz)
         # unlike the others, cov is just scratch space
 
         # so we don't include them in the object's buffers
         self.first_row = None
 
-    @property
-    def mp(self):
-        return self._mp.array
-
-    @property
-    def mpi(self):
-        return self._mpi.array
-
-    @property
-    def ts(self):
-        return self._ts.array
-
-    @property
-    def mu(self):
-        return self._mu.array
-
-    @property
-    def invn(self):
-        return self._invn.array
-
-    @property
-    def rbwd(self):
-        return self._rbwd.array
-
-    @property
-    def rfwd(self):
-        return self._cbwd.array
-
-    @property
-    def cbwd(self):
-        return self._cfwd.array
-
+    # data classes have this as a method in 3.8+
+    # It's used here to cleanly call a method on all persistent sequences used by mpx
     @property
     def astuple(self):
         return self.mp, self.mpi, self.ts, self.mu, self.invn, self.rbwd, self.rfwd, self.cbwd, self.cfwd
@@ -309,7 +298,7 @@ class MPXstream:
             I may need to adjust buffers
         """
         for seq in self.astuple:
-            seq.shiftby(ct)
+            seq.drop_leading(ct)
 
     def normalize_buffers(self):
         """ normalize buffer layout so that retained data spans the positional range
@@ -318,50 +307,47 @@ class MPXstream:
         for seq in self.astuple:
             seq.normalize_buffer()
 
-    def resize(self, sz):
-        """ resize underlying buffer. sz must accommodate the time series length rather than subsequence length.
+    def resize(self, size):
+        """ resize underlying buffer. size must accommodate the time series length rather than subsequence length.
         """
-        if self.ts.count > sz:
-            raise ValueError(f"a resized buffer of size {sz} is too small to retain a time series with {self.ts.count} "
+        if self.ts.count > size:
+            raise ValueError(f"a resized buffer of size {size} is too small to retain a time series with {self.ts.count} "
                              f"live elements")
-        elif sz == self.size:
+        elif size == self.size:
             self.normalize_buffers()
         else:
             # Buffers are allocated uniformly, because they're typically close enough in length and this allows for
             # allocating by powers of 2 if necessary
             for buf in self.buffers:
-                buf.resize(sz)
+                buf.resize_buffer(size)
 
     def append(ts):
-        self._ts.append(ts)
+        self.ts.extend(ts)
         prevct = self.sseqct
-        self._ts.append(ts)
+        self.ts.extend(ts)
         updct = max(self.ts.count - self.sseqlen + 1, 0)
         if updct == prevct:
             return
         if updct > self.ts.size:
-            self.resize(2*updct)
+            self.resize(2 * updct)
         addct = updct - prevct
         difct = addct if prevct != 0 else addct - 1
         ts_ = self.ts[prevct:]
-        mu_ = self._mu.fillable(addct)
+        self.mu.append(addct)
+        mu_ = self.mu[-addct:]
         mps.moving_mean(ts_, mu_, self.sseqlen)
 
         mu_s = np.empty(difct)
         mps.windowed_mean(ts_[:1], mu_s, w - 1)
 
-        # This can be done using fillable as well, which might make fewer copies.
-        # It's just less readable. I would probably prefer to move the fill function for these
-        # back to cython if we need to go that rather than use something weird here.
-
-        self.rbwd.extend(ts_[:difct] - mu_[-1])
+        self.rbwd.extend(ts_[:difct] - mu_[:-1])
         self.rfwd.extend(ts_[self.sseqlen:] - mu_[1:])
         self.cbwd.extend(ts_[:difct])
         self.cfwd.extend(ts_[self.sseqlen:] - mu_s)
 
         # extend these even if no comparisons are possible right now to maintain a consistent state
-        self.mp.append(initval=-1.0, count=addct)
-        self.mpi.append(initval=-1, count=addct)
+        self.mp.append(count=addct, initval=-1.0)
+        self.mpi.append(count=addct, initval=-1)
 
         if updct <= self.minsep:
             return
@@ -384,4 +370,4 @@ class MPXstream:
                       self.mp,
                       self.mpi,
                       minsep_,
-                      self.mp.minindex)
+                      self.mp.min_index)
