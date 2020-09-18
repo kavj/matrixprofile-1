@@ -24,8 +24,13 @@ class StreamArrayBase(ABC):
 
     @property
     @abstractmethod
-    def unused_count(self):
+    def free_count(self):
         """ number of presently unused entries"""
+        raise NotImplementedError
+
+    @property
+    def max_size(self):
+        """ the maximum array size supported by the current buffer """
         raise NotImplementedError
 
     @abstractmethod
@@ -97,14 +102,13 @@ class StreamArray(StreamArrayBase):
         return self.min_index + self.count - 1 if self.count != 0 else None
 
     @property
-    def unused_count(self):
+    def free_count(self):
         """ number of presently unused entries"""
         return self._array.shape[0] - self.count
 
     @property
-    def max_appendable(self):
-        """ number of unused entries located at the end of the buffer """
-        return self._array.shape[0] - self.count - self.begin_pos
+    def max_size(self):
+        return self._array.shape[0]
 
     # dunder methods are added for debugging convenience.
     # Be warned, these create views on every call
@@ -321,35 +325,47 @@ class MPXstream:
             for buf in self.buffers:
                 buf.resize_buffer(size)
 
-    def append(ts):
-        self.ts.extend(ts)
+    def append(self, data):
+
+        # This attempts to always leave things in a consistent state, regardless
+        # of whether 1 or more comparisons can be added.
+        updtslen = len(self.ts) + len(data)
+        if updtslen > self.ts.free_count:
+            self.resize(2 * updtslen)
         prevct = self.sseqct
-        self.ts.extend(ts)
-        updct = max(self.ts.count - self.sseqlen + 1, 0)
-        if updct == prevct:
+        self.ts.append(data)
+        updatedct = self.ts.count - self.sseqlen + 1
+        # end here if the length of the time series
+        # is less than subsequence length both before and after
+        # appending.
+        if updatedct < 1:
             return
-        if updct > self.ts.size:
-            self.resize(2 * updct)
-        addct = updct - prevct
+        addct = updatedct - prevct
         difct = addct if prevct != 0 else addct - 1
         ts_ = self.ts[prevct:]
         self.mu.append(addct)
         mu_ = self.mu[-addct:]
         mps.moving_mean(ts_, mu_, self.sseqlen)
 
+        # extend these even if no comparisons are possible right now to maintain a consistent state
+        self.mp.extend(count=addct, fill_value=-1.0)
+        self.mpi.extend(count=addct, fill_value=-1)
+
+        # These are only well defined if subsequence count >= 2
+        # and it's easiest to enforce here.
+        if updatedct == 1:
+            return
+
         mu_s = np.empty(difct)
         mps.windowed_mean(ts_[:1], mu_s, w - 1)
+        self.rbwd.append(ts_[:difct] - mu_[:-1])
+        self.rfwd.append(ts_[self.sseqlen:] - mu_[1:])
+        self.cbwd.append(ts_[:difct])
+        self.cfwd.append(ts_[self.sseqlen:] - mu_s)
 
-        self.rbwd.extend(ts_[:difct] - mu_[:-1])
-        self.rfwd.extend(ts_[self.sseqlen:] - mu_[1:])
-        self.cbwd.extend(ts_[:difct])
-        self.cfwd.extend(ts_[self.sseqlen:] - mu_s)
-
-        # extend these even if no comparisons are possible right now to maintain a consistent state
-        self.mp.append(count=addct, initval=-1.0)
-        self.mpi.append(count=addct, initval=-1)
-
-        if updct <= self.minsep:
+        # skip if moments and difference arrays are computable
+        # but no comparisons are possible.
+        if updatedct <= self.minsep:
             return
         elif prevct < self.minsep:
             trim = self.minsep - prevct
