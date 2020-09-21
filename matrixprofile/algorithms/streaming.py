@@ -122,6 +122,9 @@ class StreamArray(StreamArrayBase):
         """
         return self.array.size
 
+    # note: handling of wraparounds, multi-slicing, etc. whether well defined or not here, is
+    #       propagated to the currently live view of the underlying array implementation, partly
+    #       because there are too many cases to handle with a small class like this.
     def __getitem__(self, item):
         return self.array[item]
 
@@ -202,16 +205,19 @@ def xcov(ts, mu, cmpto, out=None):
 
 
 def mpx(ts, w):
+    if w < 2:
+        raise ValueError(f"Window length must be at least 2, received {w}")
     sseqct = ts.shape[0] - w + 1
     mu = np.empty(sseqct, dtype='d')
     mu_s = np.empty(sseqct, dtype='d')  # window length w - 1 skipping first and last
     invn = np.empty(sseqct, dtype='d')
     minsep = w // 4
-
+    if sseqct <= minsep:
+        return np.full(sseqct, -1.0), np.full(sseqct, -1)
     mps.windowed_mean(ts, mu, w)
     mps.windowed_mean(ts[:-1], mu_s, w - 1)
     mps.windowed_invcnorm(ts, mu, invn, w)
-    rbwd = ts[:sseqct - 1] - mu[:-1]
+    rbwd = ts[:sseqct - 1] - mu[:sseqct - 1]
     cbwd = ts[:sseqct - 1] - mu_s[1:]
     rfwd = ts[w:] - mu[1:]
     cfwd = ts[w:] - mu_s[1:]
@@ -243,8 +249,8 @@ class MPXstream:
             if not (0 < minsep < maxsep):
                 raise ValueError(f"minsep must be a positive value between 0 and maxsep if maxsep is provided, "
                                  f"received minsep: {minsep}, maxsep: {maxsep}")
-        elif minsep <= 0:
-            raise ValueError("zero or negative minsep is not well defined")
+        elif minsep < 1:
+            raise ValueError("non-positive minsep is not well defined")
         # This object indexes by subsequence, not by time series element
         self.sseqlen = sseqlen
         self.minsep = minsep
@@ -288,7 +294,7 @@ class MPXstream:
 
     @property
     def sseqct(self):
-        return self.mp.count
+        return max(self.ts.count - self.sseqlen + 1, 0)
 
     @property
     def buffer_size(self):
@@ -311,12 +317,13 @@ class MPXstream:
         for seq in self.astuple:
             seq.normalize_buffer()
 
-    def resize(self, size):
+    def resize_buffer(self, size):
         """ resize underlying buffer. size must accommodate the time series length rather than subsequence length.
         """
         if self.ts.count > size:
-            raise ValueError(f"a resized buffer of size {size} is too small to retain a time series with {self.ts.count} "
-                             f"live elements")
+            raise ValueError(
+                f"a resized buffer of size {size} is too small to retain a time series with {self.ts.count} "
+                f"live elements")
         elif size == self.size:
             self.normalize_buffers()
         else:
@@ -329,53 +336,53 @@ class MPXstream:
 
         # This attempts to always leave things in a consistent state, regardless
         # of whether 1 or more comparisons can be added.
-        updtslen = len(self.ts) + len(data)
-        if updtslen > self.ts.free_count:
-            self.resize(2 * updtslen)
+        updatedlen = self.ts.count + len(data)
+        if updatedlen > self.ts.free_count:
+            self.resize_buffer(2 * updatedlen)
         prevct = self.sseqct
         self.ts.append(data)
-        updatedct = self.ts.count - self.sseqlen + 1
-        # end here if the length of the time series
-        # is less than subsequence length both before and after
-        # appending.
-        if updatedct < 1:
-            return
-        addct = updatedct - prevct
-        difct = addct if prevct != 0 else addct - 1
-        ts_ = self.ts[prevct:]
-        self.mu.append(addct)
-        mu_ = self.mu[-addct:]
-        mps.moving_mean(ts_, mu_, self.sseqlen)
+        addct = self.sseqct - prevct
 
-        # extend these even if no comparisons are possible right now to maintain a consistent state
+        if addct == 0:
+            return
+
+        self.mu.append(addct)
+        mps.moving_mean(self.ts[prevct:], self.mu[prevct:], self.sseqlen)
+        self.invn.append(addct)
+        mps.windowed_invcnorm(self.ts[prevct:], self.mu[prevct:], self.sseqlen)
         self.mp.extend(count=addct, fill_value=-1.0)
         self.mpi.extend(count=addct, fill_value=-1)
 
-        # These are only well defined if subsequence count >= 2
-        # and it's easiest to enforce here.
-        if updatedct == 1:
+        # difference equations have only subsequence count - 1 well defined entries.
+        # If we always start from 0 from either row or column perspective, we can avoid a special case
+        # by padding zero to the first entry, but this would not work for nonzero entry points.
+
+        if prevct == 0:  # special case
+            mu_s = np.empty(addct-1, dtype='d')
+            mps.windowed_mean(self.ts[1:-1], mu_s, self.sseqlen-1)
+            self.rbwd.append(self.ts[:self.sseqct - 1] - self.mu[:-1])
+            self.cbwd.append(self.ts[:self.sseqct - 1] - mu_s)
+            self.rfwd.append(self.ts[self.sseqlen:] - self.mu[1:])
+            self.cfwd.append(self.ts[self.sseqlen:] - mu_s)
+        else:
+            # These only have subsequence count - 1 elements, so
+            # we start from prevct - 1 instead of prevct when appending
+            ts_ = self.ts[prevct - 1:]
+            mu_ = self.mu[prevct - 1:]
+            mu_s = np.empty(addct, dtype='d')
+            mps.windowed_mean(ts_[1:-1], mu_s, self.sseqlen-1)
+            self.rbwd.append(ts_[:addct-1] - mu_[:-1])
+            self.cbwd.append(ts_[:addct-1] - mu_s)
+            self.rfwd.append(ts_[self.sseqlen:] - mu_[1:])
+            self.cfwd.append(ts_[self.sseqlen:] - mu_s)
+
+        diagaddct = addct - abs(prevct - self.minsep)
+        if diagaddct < 1:
             return
 
-        mu_s = np.empty(difct)
-        mps.windowed_mean(ts_[:1], mu_s, w - 1)
-        self.rbwd.append(ts_[:difct] - mu_[:-1])
-        self.rfwd.append(ts_[self.sseqlen:] - mu_[1:])
-        self.cbwd.append(ts_[:difct])
-        self.cfwd.append(ts_[self.sseqlen:] - mu_s)
-
-        # skip if moments and difference arrays are computable
-        # but no comparisons are possible.
-        if updatedct <= self.minsep:
-            return
-        elif prevct < self.minsep:
-            trim = self.minsep - prevct
-            ts_ = ts_[trim:]
-            mu_ = mu_[trim:]
-
-        cov_ = np.empty(mu_.shape[0], dtype='d')
-        xcov(ts_, mu_, self.firstrow, out=cov_)
-
-        minsep_ = max(prevct, self.minsep)
+        minsep_ = self.sseqct - diagaddct
+        cov_ = np.empty(diagaddct, dtype='d')
+        xcov(self.ts[minsep_:], self.mu[minsep_:], self.firstrow, out=cov_)
 
         mps.mpx_inner(cov_,
                       self.rbwd,
