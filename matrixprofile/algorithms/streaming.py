@@ -353,11 +353,12 @@ class MPXstream:
         self.mp.extend(count=addct, fill_value=-1.0)
         self.mpi.extend(count=addct, fill_value=-1)
 
-        # difference equations have only subsequence count - 1 well defined entries.
-        # If we always start from 0 from either row or column perspective, we can avoid a special case
-        # by padding zero to the first entry, but this would not work for nonzero entry points.
+        # It's easier to split these.
+        # The case of prevct == 0 has to account for difference arrays only
+        # containing subsequence count - 1 valid entries. For prevct != 0, we
+        # add addct new entries, with one mixing in prior data.
 
-        if prevct == 0:  # special case
+        if prevct == 0:
             mu_s = np.empty(addct-1, dtype='d')
             mps.windowed_mean(self.ts[1:-1], mu_s, self.sseqlen-1)
             self.rbwd.append(self.ts[:self.sseqct - 1] - self.mu[:-1])
@@ -365,14 +366,12 @@ class MPXstream:
             self.rfwd.append(self.ts[self.sseqlen:] - self.mu[1:])
             self.cfwd.append(self.ts[self.sseqlen:] - mu_s)
         else:
-            # These only have subsequence count - 1 elements, so
-            # we start from prevct - 1 instead of prevct when appending
             ts_ = self.ts[prevct - 1:]
             mu_ = self.mu[prevct - 1:]
             mu_s = np.empty(addct, dtype='d')
             mps.windowed_mean(ts_[1:-1], mu_s, self.sseqlen-1)
-            self.rbwd.append(ts_[:addct-1] - mu_[:-1])
-            self.cbwd.append(ts_[:addct-1] - mu_s)
+            self.rbwd.append(ts_[:addct] - mu_[:-1])
+            self.cbwd.append(ts_[:addct] - mu_s)
             self.rfwd.append(ts_[self.sseqlen:] - mu_[1:])
             self.cfwd.append(ts_[self.sseqlen:] - mu_s)
 
