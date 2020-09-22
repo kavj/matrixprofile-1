@@ -1,4 +1,5 @@
 from abc import abstractmethod, ABC
+import matrixprofile.streamingimpl as mps
 import numpy as np
 
 
@@ -135,13 +136,15 @@ class StreamArray(StreamArrayBase):
         """
         try to extend the current array by count positions, assign fill_value to these if one is provided.
         """
-        if not (0 < count < self.maxfill):
-            raise ValueError(f"fill count must be between 0 and current buffer size {self.maxfill}, {count} received")
-        elif count > self.maxappend:
-            self.normalize_buffer()
+        if not (0 < count < self.free_count):
+            raise ValueError(f"fill count must be between 0 and current buffer size {self.free_count}, {count} received")
+        prevct = self.count
         self.count += count
+        arr = self.array[prevct:]
         if fill_value is not None:
-            self.array[-count:].fill(fill_value)
+            arr.fill(fill_value)
+        return arr  
+
 
     def drop_leading(self, count):
         """ discard ct elements from memory starting from the current beginning of the in memory
@@ -176,14 +179,12 @@ class StreamArray(StreamArrayBase):
             maintains consistency with that, without checking explicit inheritance from Iterable, which numpy may
             not adhere to strictly.
         """
-        reqspace = dat.size
-        if self.maxfill < reqspace:
-            raise ValueError(f"appending {dat.size} elements would overflow available buffer space: {self.maxfill}")
-        elif self.maxappend < reqspace:
-            self.normalize_buffer()
+        reqspace = data.size
+        if self.free_count < reqspace:
+            raise ValueError(f"appending {dat.size} elements would overflow available buffer space: {self.free_count}")
         prevct = self.count
         self.count += reqspace
-        self.array[prevct:] = dat
+        self.array[prevct:] = data
 
     def normalize_buffer(self):
         """ normalize buffer layout so that retained data spans the positional range
@@ -200,7 +201,7 @@ def xcov(ts, mu, cmpto, out=None):
     sseqct = ts.shape[0] - cmpto.shape[0] + 1
     if sseqct > 0 and out is None:
         out = np.empty(sseqct - minsep, dtype='d')
-    mps.crosscov(out, ts[minsep:], mu[minsep:], cmpto)
+    mps.crosscov(out, ts, mu, cmpto)
     return out
 
 
@@ -236,7 +237,7 @@ def mpx(ts, w):
     return mp, mpi
 
 
-class MPXstream:
+class MpxStream:
     """
        This provides a simple implementation based on the buffered array class.
 
@@ -269,7 +270,7 @@ class MPXstream:
         # I'm using a leading underscore, which indicates that something should be private, to refer
         # to the buffer data structure here and no underscore to refer to the live section of the array
         self.mp = StreamArray(minbufsz)
-        self.mpi = StreamArray(minbufsz, dtype='q')
+        self.mpi = StreamArray(minbufsz, dtype='i')
         self.ts = StreamArray(minbufsz)
         self.mu = StreamArray(minbufsz)
         self.invn = StreamArray(minbufsz)
@@ -324,12 +325,12 @@ class MPXstream:
             raise ValueError(
                 f"a resized buffer of size {size} is too small to retain a time series with  {self.ts.count} "
                 f"live elements")
-        elif size == self.size:
+        elif size == self.count:
             self.normalize_buffers()
         else:
             # Buffers are allocated uniformly, because they're typically close enough in length and this allows for
             # allocating by powers of 2 if necessary
-            for buf in self.buffers:
+            for buf in self.astuple:
                 buf.resize_buffer(size)
 
     def append(self, data):
@@ -341,15 +342,14 @@ class MPXstream:
             self.resize_buffer(2 * updatedlen)
         prevct = self.sseqct
         self.ts.append(data)
+        ts_ = self.ts[prevct:]
         addct = self.sseqct - prevct
-
         if addct == 0:
             return
-
-        self.mu.append(addct)
-        mps.moving_mean(self.ts[prevct:], self.mu[prevct:], self.sseqlen)
-        self.invn.append(addct)
-        mps.windowed_invcnorm(self.ts[prevct:], self.mu[prevct:], self.sseqlen)
+        mu_ = self.mu.extend(addct)
+        mps.windowed_mean(ts_, mu_, self.sseqlen)
+        invn_ = self.invn.extend(addct)
+        mps.windowed_invcnorm(ts_, mu_, invn_, self.sseqlen)
         self.mp.extend(count=addct, fill_value=-1.0)
         self.mpi.extend(count=addct, fill_value=-1)
 
@@ -384,15 +384,15 @@ class MPXstream:
 
         minsep_ = self.sseqct - diagaddct
         cov_ = np.empty(diagaddct, dtype='d')
-        xcov(self.ts[minsep_:], self.mu[minsep_:], self.firstrow, out=cov_)
+        xcov(self.ts[minsep_:], self.mu[minsep_:], self.first_row, out=cov_)
 
         mps.mpx_inner(cov_,
-                      self.rbwd,
-                      self.rfwd,
-                      self.cbwd,
-                      self.cfwd,
-                      self.invn,
-                      self.mp,
-                      self.mpi,
+                      self.rbwd.array,
+                      self.rfwd.array,
+                      self.cbwd.array,
+                      self.cfwd.array,
+                      self.invn.array,
+                      self.mp.array,
+                      self.mpi.array,
                       minsep_,
                       self.mp.min_index)
