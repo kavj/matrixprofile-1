@@ -322,7 +322,7 @@ class MPXstream:
         """
         if self.ts.count > size:
             raise ValueError(
-                f"a resized buffer of size {size} is too small to retain a time series with {self.ts.count} "
+                f"a resized buffer of size {size} is too small to retain a time series with  {self.ts.count} "
                 f"live elements")
         elif size == self.size:
             self.normalize_buffers()
@@ -358,7 +358,10 @@ class MPXstream:
         # containing subsequence count - 1 valid entries. For prevct != 0, we
         # add addct new entries, with one mixing in prior data.
 
-        if prevct == 0:
+        if prevct == 0 and addct == 1:
+            return
+        elif prevct < 2:
+            self.first_row = self.ts[:self.sseqlen] - self.mu[0]
             mu_s = np.empty(addct-1, dtype='d')
             mps.windowed_mean(self.ts[1:-1], mu_s, self.sseqlen-1)
             self.rbwd.append(self.ts[:self.sseqct - 1] - self.mu[:-1])

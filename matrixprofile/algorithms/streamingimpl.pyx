@@ -90,21 +90,33 @@ cpdef mpx_difeq(double [::1] out, double[::1] ts, double[::1] mu):
         out[i] = ts[i] - mu[i]
 
 
-cpdef mpx_inner(double[::1] cov, double[::1] r_bwd, double[::1] r_fwd, double[::1] c_bwd, double[::1] c_fwd, double[::1] invn, double[::1] mp, int[::1] mpi, int minlag, int roffset):   
-    cdef int i, j, diag, row, col
-    cdef double cov_, corr_ 
+cpdef mpx_inner(double[::1] cov,
+                double[::1] r_bwd,
+                double[::1] r_fwd,
+                double[::1] c_bwd,
+                double[::1] c_fwd,
+                double[::1] invn,
+                double[::1] mp,
+                int[::1] mpi,
+                int minlag,
+                int roffset):
+    cdef int i, j, diag, row, col, cvpos
+    cdef double cv, corr_
     cdef int subseqct = mp.shape[0]
     # check full requirements for shape mismatches
     if not ((cov.shape[0] + minlag) == mp.shape[0] == mpi.shape[0] == invn.shape[0]):
-        raise ValueError(f'these should match, cov-minlag:{cov.shape[0]+minlag}, mp:{mp.shape[0]}, mpi:{mpi.shape[0]}, invn:{invn.shape[0]}')
+        raise ValueError(f"these should match, cov-minlag:{cov.shape[0]+minlag}, mp:{mp.shape[0]}, mpi:{mpi.shape[0]}, invn:{invn.shape[0]}")
+    elif minlag < 1:
+        raise ValueError(f"minlag must be a positive integer, received {minlag}")
     for diag in range(minlag, subseqct):
-        cov_ = cov[diag-minlag]
+        cvpos = diag - minlag
+        cv = cov[cvpos]
         for row in range(subseqct - diag):
             col = diag + row
             if row > 0: 
-                cov_ -= r_bwd[row-1] * c_bwd[col-1] 
-                cov_ += r_fwd[row-1] * c_fwd[col-1]
-            corr_ = cov_ * invn[row] * invn[col]
+                cv -= r_bwd[row-1] * c_bwd[col-1]
+                cv += r_fwd[row-1] * c_fwd[col-1]
+            corr_ = cv * invn[row] * invn[col]
             if corr_ > 1.0:
                 corr_ = 1.0
             if corr_ > mp[row]:
