@@ -8,13 +8,13 @@ from __future__ import unicode_literals
 range = getattr(__builtins__, 'xrange', range)
 # end of py2 compatability boilerplate
 
-import math
-
 import numpy as np
 
 from matrixprofile import core
 from matrixprofile.algorithms.cympx import mpx_parallel as cympx_parallel
 from matrixprofile.algorithms.cympx import mpx_ab_parallel as cympx_ab_parallel
+
+
 
 
 def mpx(ts, w, query=None, cross_correlation=False, n_jobs=1):
@@ -61,21 +61,19 @@ def mpx(ts, w, query=None, cross_correlation=False, n_jobs=1):
         >>> }
 
     """
-    ts = core.to_np_array(ts).astype('d')
+    ts = np.asarray(ts, dtype='d')
+    if ts.ndim != 1:
+        raise ValueError("mpx requires a 1D input")
     n_jobs = core.valid_n_jobs(n_jobs)
     is_join = False
 
     if core.is_array_like(query):
         query = core.to_np_array(query).astype('d')
         is_join = True
-        mp, mpi, mpb, mpib = cympx_ab_parallel(ts, query, w, 
-            int(cross_correlation), n_jobs)
+        mp, mpi, mpb, mpib = cympx_ab_parallel(ts, query, w, cross_correlation, n_jobs)
     else:
-        mp, mpi = cympx_parallel(ts, w, int(cross_correlation), n_jobs)
+        mp, mpi = cympx_parallel(ts, w, cross_correlation, n_jobs)
 
-
-    mp = np.asarray(mp)
-    mpi = np.asarray(mpi)
     distance_metric = 'euclidean'
     if cross_correlation:
         distance_metric = 'cross_correlation'
