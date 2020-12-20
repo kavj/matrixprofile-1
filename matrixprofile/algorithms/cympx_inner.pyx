@@ -4,7 +4,7 @@ import numpy as np
 cimport numpy as cnp
 
 
-def compute_difference_equations(df, dg, ts, mu):
+cpdef compute_difference_equations(df, dg, ts, mu):
     """  
     Function compute_difference_equations is a python interface meant for testing difference equations used in mpx.
 
@@ -35,7 +35,7 @@ def compute_difference_equations(df, dg, ts, mu):
     difference_equations(df, dg, ts, mu, w)
 
 
-def compute_cross_cov(cc, ts, mu, cmpseq):
+cpdef compute_cross_cov(cc, ts, mu, cmpseq):
     """  
     Function compute_cross_cov provides a python interface to cross_cov. This is primarily intended for internal testing 
     without the need to compile test cases.
@@ -64,7 +64,7 @@ def compute_cross_cov(cc, ts, mu, cmpseq):
     cross_cov(cc, ts, mu, cmpseq)
 
 
-def compute_self_compare(mp, mpi, cov, df, dg, sig, w, minlag, index_offset=0):
+cpdef compute_self_compare(mp, mpi, cov, df, dg, sig, w, minlag, index_offset=0):
     """
     Function compute_self_compare is a python interface meant for internal testing of the C interface inner_self.
 
@@ -107,7 +107,7 @@ def compute_self_compare(mp, mpi, cov, df, dg, sig, w, minlag, index_offset=0):
     self_compare(mp, mpi, cov, df, dg, sig, w, minlag, index_offset)
 
 
-def compute_ab_compare(mp_a, mp_b, mpi_a, mpi_b, cov, df_a, df_b, dg_a, dg_b, sig_a, sig_b, offset_a=0, offset_b=0):
+cpdef compute_ab_compare(mp_a, mp_b, mpi_a, mpi_b, cov, df_a, df_b, dg_a, dg_b, sig_a, sig_b, offset_a=0, offset_b=0):
     """
     Function compute_ab_compare is a python interface meant for the C interface inner_ab.
     This is a low level interface, used for internal testing.

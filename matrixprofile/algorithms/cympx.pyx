@@ -1,3 +1,5 @@
+#cython: language=c++
+
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
 from __future__ import division
@@ -13,16 +15,108 @@ from libc.math cimport sqrt
 
 from cython.parallel import prange
 
-from numpy cimport ndarray
 cimport numpy as np
+from numpy cimport ndarray
 cimport cython
 cimport openmp
 from numpy.math cimport INFINITY
+from libcpp cimport bool
 from .cympx_inner cimport cross_cov, self_compare, ab_compare, difference_equations
 
 import numpy as np
 
 from matrixprofile.cycore import muinvn
+
+
+
+@cython.boundscheck(False)
+@cython.cdivision(True)
+@cython.wraparound(False)
+cpdef mpx_masked_parallel(double[::1] mp, mpi, double[::1] cov, double[::1] df, double[::1] dg, double[::1] sig, bool[::1] isvalidwindow, int minlag, int w, int offset=0, int n_jobs=1):
+    """
+    This is a parallel implementation of the method used by MPX to compute nearest neighbors between
+    windows of a time series. This interface is intended to handle missing data, with the assumption that the 
+    input parameters begin and end on windows with valid normalized forms.
+
+    This is a low level interface, intended for internal use.
+
+
+    Parameters
+    ----------
+    mp : array_like
+        The output array for the matrix profile.
+    
+    mpi : array_like
+        The output array for the matrix profile index.
+
+    cov : array_like
+        The co-moments of the first window of the time series, and windows minlag....windowcount
+    
+    df : array_like
+        The first difference equation used by mpx.
+
+    dg : array_like
+        The second difference equation used by mpx.
+
+    minlag : int
+        The minimum index difference between two comparisons.
+
+    offset : int
+        The starting index of the input arrays with respect to the original time series. This is 
+        useful for cases where a time series is blocked or has missing data at the beginning of the input.    
+
+    n_jobs : int, Default = 1
+        Maximum number of threads.
+    
+
+    Returns
+    -------
+
+    See also
+    --------
+    missingdata.py
+
+    """
+   
+    if not (cov.shape[0] + minlag == mp.shape[0] == mpi.shape[0] == df.shape[0] == dg.shape[0] == sig.shape[0] == isvalidwindow.shape[0]):
+        raise ValueError("Array input lengths have inconsistent subsequence counts.")
+    elif not (isvalidwindow[0] == isvalidwindow[isvalidwindow.shape[0] - 1] == True):
+        # Note: cov[0] must contain the co-moment for the windows at 0 and minlag at entry,
+        #       so if the entry at 0 is invalid, this is invalid. If the entry at minlag is invalid
+        #       minlag must be widened by the caller. 
+        raise ValueError("Inputs must begin and end on a valid region")
+
+    cdef int profile_len = mp.shape[0]
+
+    # this is where we compute the diagonals and later the matrix profile
+
+    cdef int diagct = profile_len - minlag
+    cdef int blockwid = diagct // n_jobs
+
+    if blockwid == 0:
+        # fall back to sequential in this case, since it indicates a small problem anyway
+        blockwid = diagct
+        n_jobs = 1
+
+    cdef np.ndarray[np.double_t, ndim=1] tmp_mp = np.full((n_jobs, profile_len), -1.0, dtype='d')
+    cdef np.ndarray[np.int_t, ndim=1] tmp_mpi = np.full((n_jobs, profile_len), -1, dtype='int')
+
+    cdef int diag, cov_begin, threadnum, i, j
+
+    for diag in prange(minlag, profile_len, blockwid, num_threads=n_jobs, nogil=True):
+        cov_begin = diag - minlag
+        threadnum = openmp.omp_get_thread_num()
+        #self_compare(tmp_mp[threadnum, :], tmp_mpi[threadnum,:], cov[cov_begin:cov_begin+blockwid], df, dg, sig, w, diag, 0)
+
+    # combine parallel results...
+    for i in range(tmp_mp.shape[0]):
+        for j in range(tmp_mp.shape[1]):
+            if tmp_mp[i,j] > mp[j]:
+                if tmp_mp[i, j] > 1.0:
+                    mp[j] = 1.0
+                else:
+                    mp[j] = tmp_mp[i, j]
+                mpi[j] = tmp_mpi[i, j]
 
 
 @cython.boundscheck(False)

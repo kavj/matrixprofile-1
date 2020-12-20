@@ -15,6 +15,73 @@ from matrixprofile.algorithms.cympx import mpx_parallel as cympx_parallel
 from matrixprofile.algorithms.cympx import mpx_ab_parallel as cympx_ab_parallel
 
 
+def mpx_self_compare_dispatch(ts, w, cross_correlation=0, n_jobs=1):
+    """
+
+    Parameters
+    ----------
+    ts : array_like
+        The time series to compute the matrix profile for.
+    w : int
+        The window size.
+    cross_correlation : bint
+        Flag (0, 1) to determine if cross_correlation distance should be
+        returned. It defaults to Euclidean Distance (0).
+    n_jobs : int, Default = 1
+        Number of cpu cores to use.
+    
+    Returns
+    -------
+    (array_like, array_like) :
+        The matrix profile (distance profile, profile index).
+
+    """
+
+    n =  ts.shape[0]
+    profile_len = n - w + 1
+    minlag = w // 4
+    mp = np.full(profile_len, -1.0)
+    mpi = np.full(profile_len, -1, dtype=np.int_)
+
+    if profile_len - minlag <= 0:
+        warn("Time series is too short to perform any comparisons.")
+        return mp, mpi
+    
+    ts, mu, invn, first, last, isvalidwindow = mpx_preprocessing(ts, w)
+    
+    # Raise an error rather instead of recursively shrinking window range
+    if not isvalidwindow[0]:
+        raise ValueError
+
+    span = ts.shape[0] - w + 1
+    diagcount = span - minlag
+
+    if diagcount <= 0:
+        warn("Zero valid comparisons could be performed due to missing data")
+        return mp, mpi
+
+    if not isvalidwindow[minlag]:
+        options, = np.where(isvalidwindow[minlag:])
+        if options.shape[0] == 0:
+            warn(f"Zero valid comparisons could be performed minlag width: {minlag} or more apart")
+            return mp, mpi
+
+    cov = np.empty(span - minlag)
+    # At this point, at least one comparison here is valid
+    # and ts[:w] - mu[0] has a valid normalized form. 
+    # Nothing else is guaranteed.
+    cross_cov(cov, ts, mu, ts[:w] - mu[0])
+    
+    # If the remaining problem is one contiguous chunk
+    # we can compute the actual comparisons naively.
+    missing_count = span - np.count_nonzero(isvalidwindow)
+    if missing_count == 0:
+        # something like
+        self_compare(mp[first:last+1], mpi[first:last+1], cov, df, dg, sig, w, minlag, index_offset=0)
+    else:
+        masked_self_compare_masked(mp, mpi, cov, df, dg, sig, w, minlag, index_offset=0)
+    
+    return mp, mpi
 
 
 def mpx(ts, w, query=None, cross_correlation=False, n_jobs=1):
